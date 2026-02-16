@@ -1,5 +1,5 @@
 {
-  "name": "Raider Companion",
+  "name": "raider-companion",
   "version": "1.0.0",
   "description": "Discord bot to track ARC Raiders event rotations and be a general copmpanion for Raiders",
   "main": "bot.js",
