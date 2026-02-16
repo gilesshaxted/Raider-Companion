@@ -186,6 +186,22 @@ async function getOrCreateEventRole(guild, eventName) {
     }
 }
 
+/**
+ * Fetches an image from a URL and converts it to a base64 data URI for Discord
+ */
+async function fetchImageAsBase64(url) {
+    if (!url) return null;
+    try {
+        const response = await axios.get(url, { responseType: 'arraybuffer' });
+        const buffer = Buffer.from(response.data, 'binary');
+        const contentType = response.headers['content-type'] || 'image/png';
+        return `data:${contentType};base64,${buffer.toString('base64')}`;
+    } catch (err) {
+        console.error(`Failed to fetch image for scheduled event: ${url}`, err.message);
+        return null;
+    }
+}
+
 // --- BOT LOGIC ---
 async function updateEvents(targetGuildId = null, forceNewMessages = false) {
     if (isUpdating && !targetGuildId) return;
@@ -234,7 +250,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 config.activeAlerts = freshAlerts;
             }
 
-            // 2. DISCORD SCHEDULED EVENTS SYNC (Look ahead 3 hours)
+            // 2. DISCORD SCHEDULED EVENTS SYNC
             let existingScheduledEvents = [];
             try {
                 existingScheduledEvents = await guild.scheduledEvents.fetch();
@@ -250,6 +266,13 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
 
                 if (!alreadyScheduled) {
                     try {
+                        // Find matching map image from mapConfigs
+                        const mapKey = Object.keys(mapConfigs).find(k => 
+                            k.toLowerCase().replace(/\s/g, '') === e.map?.toLowerCase().replace(/\s/g, '')
+                        );
+                        const mapImage = mapKey ? mapConfigs[mapKey].image : null;
+                        const imageBase64 = await fetchImageAsBase64(mapImage);
+
                         await guild.scheduledEvents.create({
                             name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
                             scheduledStartTime: new Date(e.startTime),
@@ -257,6 +280,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                             privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
                             entityType: GuildScheduledEventEntityType.External,
                             entityMetadata: { location: e.map },
+                            image: imageBase64, // Applied cover image
                             description: `Upcoming in-game event rotation on ${e.map}. Be ready Raiders!`
                         });
                     } catch (err) {
@@ -264,7 +288,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     }
                 }
 
-                // 3. CHANNEL PING LOGIC (Look ahead 1 hour)
+                // 3. CHANNEL PING LOGIC
                 if (e.startTime <= alertWindow) {
                     const alertKey = `${e.name}_${e.map}_${e.startTime}`;
                     if (!config.alertedEventKeys) config.alertedEventKeys = [];
