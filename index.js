@@ -33,6 +33,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
 const ARCS_API_URL = 'https://metaforge.app/api/arc-raiders/arcs';
+const ITEMS_API_URL = 'https://metaforge.app/api/arc-raiders/items?limit=1000';
 const CHECK_INTERVAL = 60000;
 
 let config = {
@@ -55,6 +56,14 @@ const mapConfigs = {
     'Stella Montis': { color: 0xf1c40f, image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472982493719298281/ARC-Raiders-Stella-Montis-map-guide.png' }
 };
 
+const rarityColors = {
+    'Common': 0x95a5a6,
+    'Uncommon': 0x2ecc71,
+    'Rare': 0x3498db,
+    'Epic': 0x9b59b6,
+    'Legendary': 0xf1c40f
+};
+
 const eventEmojis = {
     'Night Raid': '🌙', 'Prospecting Probes': '📡', 'Matriarch': '👑', 'Bird City': '🐦',
     'Hidden Bunker': '🏢', 'Cold Snap': '❄️', 'Harvester': '🚜', 'Electromagnetic Storm': '⚡',
@@ -73,6 +82,7 @@ const client = new Client({
 });
 
 let arcCache = [];
+let itemCache = [];
 let lastAlertedEventTime = null;
 
 // --- PERSISTENCE HELPERS ---
@@ -93,17 +103,18 @@ async function loadConfig() {
     } catch (e) { console.error("Error loading config:", e); }
 }
 
-async function refreshArcCache() {
+async function refreshCaches() {
     try {
-        const response = await axios.get(ARCS_API_URL);
-        arcCache = response.data?.data || [];
-        console.log(`Cached ${arcCache.length} ARCs.`);
-    } catch (e) { console.error("Error fetching Arcs:", e.message); }
+        const arcRes = await axios.get(ARCS_API_URL);
+        arcCache = arcRes.data?.data || [];
+        
+        const itemRes = await axios.get(ITEMS_API_URL);
+        itemCache = itemRes.data?.data || [];
+        
+        console.log(`Caches Refreshed: ${arcCache.length} ARCs, ${itemCache.length} Items.`);
+    } catch (e) { console.error("Error refreshing caches:", e.message); }
 }
 
-/**
- * Ensures a role exists for an event and returns its mention string.
- */
 async function getOrCreateEventRole(guild, eventName) {
     let role = guild.roles.cache.find(r => r.name === eventName);
     if (!role) {
@@ -113,10 +124,8 @@ async function getOrCreateEventRole(guild, eventName) {
                 reason: 'Auto-created for ARC Raiders rotation alerts',
                 mentionable: true
             });
-            console.log(`Created new role: ${eventName}`);
         } catch (e) {
-            console.error(`Failed to create role for ${eventName}:`, e.message);
-            return `**${eventName}**`; // Fallback to bold text
+            return `**${eventName}**`;
         }
     }
     return `<@&${role.id}>`;
@@ -139,8 +148,6 @@ async function updateEvents(forceNewMessages = false) {
 
         const guild = channel.guild;
 
-        // 1. Alert Logic (Non-embed message with Role Ping)
-        // Find the next rotation overall
         const overallNext = events
             .filter(e => e.startTime > now)
             .sort((a, b) => a.startTime - b.startTime)[0];
@@ -155,7 +162,6 @@ async function updateEvents(forceNewMessages = false) {
             }
         }
 
-        // 2. Map Management
         if (forceNewMessages) {
             for (const key in config.messageIds) {
                 if (config.messageIds[key]) {
@@ -232,31 +238,31 @@ const commandsData = [
     new SlashCommandBuilder()
         .setName('setup')
         .setDescription('Set the channel for live event updates')
-        .addChannelOption(option => 
-            option.setName('channel')
-                .setDescription('The channel to post in')
-                .setRequired(true))
+        .addChannelOption(option => option.setName('channel').setDescription('The channel to post in').setRequired(true))
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .toJSON(),
     new SlashCommandBuilder()
         .setName('arc')
-        .setDescription('Get detailed intelligence on a specific ARC unit')
-        .addStringOption(option =>
-            option.setName('unit')
-                .setDescription('Pick an ARC unit')
-                .setRequired(true)
-                .setAutocomplete(true))
+        .setDescription('Get intelligence on a specific ARC unit')
+        .addStringOption(option => option.setName('unit').setDescription('Pick an ARC unit').setRequired(true).setAutocomplete(true))
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('item')
+        .setDescription('Lookup an item, weapon, or material')
+        .addStringOption(option => option.setName('name').setDescription('Search for an item').setRequired(true).setAutocomplete(true))
         .toJSON()
 ];
 
 client.on('interactionCreate', async interaction => {
     if (interaction.isAutocomplete()) {
+        const focusedValue = interaction.options.getFocused().toLowerCase();
         if (interaction.commandName === 'arc') {
-            const focusedValue = interaction.options.getFocused().toLowerCase();
             const choices = arcCache.filter(arc => arc.name.toLowerCase().includes(focusedValue));
-            await interaction.respond(
-                choices.slice(0, 25).map(arc => ({ name: arc.name, value: arc.id }))
-            );
+            await interaction.respond(choices.slice(0, 25).map(arc => ({ name: arc.name, value: arc.id })));
+        }
+        if (interaction.commandName === 'item') {
+            const choices = itemCache.filter(item => item.name.toLowerCase().includes(focusedValue));
+            await interaction.respond(choices.slice(0, 25).map(item => ({ name: item.name, value: item.id })));
         }
         return;
     }
@@ -267,18 +273,13 @@ client.on('interactionCreate', async interaction => {
         const targetChannel = interaction.options.getChannel('channel');
         config.channelId = targetChannel.id;
         for (let key in config.messageIds) config.messageIds[key] = null;
-        
         await interaction.reply({ content: `✅ Events will now be posted and kept current in ${targetChannel}.`, ephemeral: true });
         updateEvents();
     }
 
     if (interaction.commandName === 'arc') {
-        const arcId = interaction.options.getString('unit');
-        const arc = arcCache.find(a => a.id === arcId);
-
-        if (!arc) {
-            return interaction.reply({ content: "❌ Unit intelligence not found. Please pick a valid unit from the list.", ephemeral: true });
-        }
+        const arc = arcCache.find(a => a.id === interaction.options.getString('unit'));
+        if (!arc) return interaction.reply({ content: "❌ Intelligence not found.", ephemeral: true });
 
         const embed = new EmbedBuilder()
             .setTitle(`🤖 Intelligence: ${arc.name}`)
@@ -286,41 +287,63 @@ client.on('interactionCreate', async interaction => {
             .setColor(0x5865F2)
             .setThumbnail(arc.icon)
             .setImage(arc.image)
-            .setTimestamp()
-            .setFooter({ text: 'ARC Intelligence Database' });
+            .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    if (interaction.commandName === 'item') {
+        const item = itemCache.find(i => i.id === interaction.options.getString('name'));
+        if (!item) return interaction.reply({ content: "❌ Item not found.", ephemeral: true });
+
+        const embed = new EmbedBuilder()
+            .setTitle(`📦 Item: ${item.name}`)
+            .setDescription(item.description || 'No description available.')
+            .setColor(rarityColors[item.rarity] || 0x5865F2)
+            .setThumbnail(item.icon)
+            .addFields(
+                { name: 'Rarity', value: item.rarity || 'Common', inline: true },
+                { name: 'Type', value: item.item_type || 'Unknown', inline: true },
+                { name: 'Value', value: `🪙 ${item.value?.toLocaleString() || 0}`, inline: true }
+            );
+
+        if (item.workbench) embed.addFields({ name: 'Crafting', value: `🛠️ ${item.workbench}`, inline: true });
+        if (item.loot_area) embed.addFields({ name: 'Loot Area', value: `📍 ${item.loot_area}`, inline: true });
+
+        // Add dynamic Stats if they exist
+        if (item.stat_block) {
+            const stats = Object.entries(item.stat_block)
+                .filter(([_, v]) => v !== 0 && v !== null && v !== "")
+                .map(([k, v]) => `• **${k.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase())}:** ${v}`)
+                .join('\n');
+            if (stats) embed.addFields({ name: '📊 Statistics', value: stats });
+        }
+
+        if (item.flavor_text) embed.setFooter({ text: item.flavor_text });
 
         await interaction.reply({ embeds: [embed] });
     }
 });
 
 client.on('messageCreate', async message => {
-    if (message.author.bot) return;
-    if (message.channel.id === config.channelId) {
-        updateEvents(true);
-    }
+    if (message.author.bot || !config.channelId) return;
+    if (message.channel.id === config.channelId) updateEvents(true);
 });
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     await loadConfig();
-    await refreshArcCache();
+    await refreshCaches();
     
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
         const guilds = client.guilds.cache;
         for (const [guildId, guild] of guilds) {
             try {
-                await rest.put(
-                    Routes.applicationGuildCommands(CLIENT_ID, guildId),
-                    { body: commandsData }
-                );
-            } catch (err) { console.error(`Guild refresh fail for ${guildId}:`, err.message); }
+                await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commandsData });
+            } catch (err) {}
         }
-        
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
-        console.log('Slash commands refreshed everywhere.');
-
-    } catch (e) { console.error('Command registration fail:', e); }
+    } catch (e) {}
 
     updateEvents();
     setInterval(updateEvents, CHECK_INTERVAL);
