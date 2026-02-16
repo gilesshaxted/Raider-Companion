@@ -10,14 +10,20 @@ const {
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
-const { initializeApp } = require('firebase/app');
-const { getFirestore, doc, getDoc, setDoc } = require('firebase/firestore');
+const admin = require('firebase-admin');
 
-// --- FIREBASE SETUP ---
-const firebaseConfig = JSON.parse(process.__firebase_config || '{}');
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'raider-companion';
+// --- FIREBASE ADMIN SETUP ---
+// We use your project credentials to initialize the Admin SDK.
+// This allows the bot to securely read/write to Firestore as a backend service.
+if (!admin.apps.length) {
+    admin.initializeApp({
+        projectId: "raider-companion",
+        // The Admin SDK uses internal authentication. For Koyeb/Local, 
+        // you would typically use a service account key JSON.
+    });
+}
+const db = admin.firestore();
+const appId = 'raider-companion';
 
 // --- KOYEB HEALTH CHECK SERVER ---
 const PORT = process.env.PORT || 8000;
@@ -68,15 +74,18 @@ const client = new Client({
 // --- PERSISTENCE HELPERS ---
 async function saveConfig() {
     try {
-        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'config'), config);
+        const docRef = db.collection('artifacts').doc(appId).collection('public').doc('config');
+        await docRef.set(config);
     } catch (e) { console.error("Error saving config:", e); }
 }
 
 async function loadConfig() {
     try {
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'config');
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) config = docSnap.data();
+        const docRef = db.collection('artifacts').doc(appId).collection('public').doc('config');
+        const docSnap = await docRef.get();
+        if (docSnap.exists) {
+            config = docSnap.data();
+        }
     } catch (e) { console.error("Error loading config:", e); }
 }
 
@@ -93,7 +102,6 @@ async function updateEvents(forceNewMessages = false) {
         const channel = await client.channels.fetch(config.channelId);
         if (!channel) return;
 
-        // If forced (e.g. someone chatted), delete old messages to move to bottom
         if (forceNewMessages) {
             for (const key in config.messageIds) {
                 if (config.messageIds[key]) {
@@ -106,7 +114,6 @@ async function updateEvents(forceNewMessages = false) {
             }
         }
 
-        // 1. Map Embeds
         for (const [mapName, mapSet] of Object.entries(mapConfigs)) {
             const mapEvents = events.filter(e => e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, ''));
             const activeEvent = mapEvents.find(e => e.startTime <= now && e.endTime > now);
@@ -133,7 +140,6 @@ async function updateEvents(forceNewMessages = false) {
             await syncMessage(channel, mapName, embed);
         }
 
-        // 2. Summary
         const current = events.filter(e => e.startTime <= now && e.endTime > now);
         const summary = new EmbedBuilder()
             .setTitle('🛸 ARC Raiders - Live Summary')
@@ -167,7 +173,6 @@ async function syncMessage(channel, key, embed) {
     }
 }
 
-// --- COMMAND REGISTRATION ---
 const commands = [
     new SlashCommandBuilder()
         .setName('setup')
@@ -181,7 +186,6 @@ client.on('interactionCreate', async interaction => {
     if (interaction.commandName === 'setup') {
         const targetChannel = interaction.options.getChannel('channel');
         config.channelId = targetChannel.id;
-        // Reset message IDs to post fresh
         for (let key in config.messageIds) config.messageIds[key] = null;
         
         await interaction.reply({ content: `✅ Events will now be posted and kept current in ${targetChannel}.`, ephemeral: true });
@@ -189,11 +193,9 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-// --- PERSISTENCE: KEEP MESSAGES AT BOTTOM ---
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
     if (message.channel.id === config.channelId) {
-        // Someone sent a message in the tracker channel, re-post to stay at bottom
         updateEvents(true);
     }
 });
