@@ -6,7 +6,8 @@ const {
     REST, 
     Routes, 
     SlashCommandBuilder, 
-    PermissionFlagsBits 
+    PermissionFlagsBits,
+    Events 
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
@@ -83,10 +84,9 @@ const getEmoji = (name) => eventEmojis[name] || '🛸';
 
 const client = new Client({
     intents: [
-        GatewayIntentBits.Guilds, 
-        GatewayIntentBits.GuildMessages, 
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildRoles
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
     ]
 });
 
@@ -111,7 +111,8 @@ async function ensureAuth() {
 async function saveConfig() {
     if (!await ensureAuth()) return;
     try {
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'config');
+        // FIXED: Added 'bot' collection segment to ensure an even number of path segments (6 total)
+        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bot', 'config');
         await setDoc(docRef, config);
     } catch (e) { console.error("Error saving config:", e.message); }
 }
@@ -119,7 +120,8 @@ async function saveConfig() {
 async function loadConfig() {
     if (!await ensureAuth()) return;
     try {
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'config');
+        // FIXED: Added 'bot' collection segment to ensure an even number of path segments (6 total)
+        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bot', 'config');
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
             config = docSnap.data();
@@ -352,7 +354,7 @@ client.on('messageCreate', async message => {
     if (message.channel.id === config.channelId) updateEvents(true);
 });
 
-client.once('ready', async () => {
+client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
     await loadConfig();
     await refreshCaches();
