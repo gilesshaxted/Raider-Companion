@@ -1,17 +1,23 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+require('dotenv').config();
+const { Client, GatewayIntentBits, EmbedBuilder, TextChannel } = require('discord.js');
 const axios = require('axios');
 
 // --- CONFIGURATION ---
-// We use process.env to keep your token secret when hosting on GitHub
 const TOKEN = process.env.DISCORD_TOKEN; 
-const CHANNEL_ID = '1077242377099550863'; // Channel for alerts and live status
-const LIVE_MESSAGE_ID = null; // Set this after the first run to keep updating ONE message
+const CHANNEL_ID = '1077242377099550863'; 
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
-const CHECK_INTERVAL = 60000; // Check every 60 seconds
+const CHECK_INTERVAL = 60000; // 1 minute
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+// To keep the same message updated, paste the ID here after the first run
+let LIVE_MESSAGE_ID = null; 
 
-// Memory to prevent duplicate alerts
+const client = new Client({ 
+    intents: [
+        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.GuildMessages 
+    ] 
+});
+
 let lastAlertedEventTime = null;
 
 async function updateEvents() {
@@ -25,11 +31,16 @@ async function updateEvents() {
         const currentEvents = events.filter(e => e.startTime <= now && e.endTime > now);
         const nextRotation = events.find(e => e.startTime > now);
 
-        // 2. Alert Logic: If the next event starts within 15 mins and we haven't alerted yet
+        const channel = await client.channels.fetch(CHANNEL_ID);
+        if (!(channel instanceof TextChannel)) {
+            console.error("The provided Channel ID is not a text channel.");
+            return;
+        }
+
+        // 2. Alert Logic
         if (nextRotation && nextRotation.startTime <= fifteenMinsFromNow) {
             if (lastAlertedEventTime !== nextRotation.startTime) {
-                const alertChannel = await client.channels.fetch(CHANNEL_ID);
-                await alertChannel.send({
+                await channel.send({
                     content: `⚠️ **Upcoming Event:** ${nextRotation.name} starts <t:${Math.floor(nextRotation.startTime / 1000)}:R>!`
                 });
                 lastAlertedEventTime = nextRotation.startTime;
@@ -46,6 +57,8 @@ async function updateEvents() {
         if (currentEvents.length > 0) {
             const list = currentEvents.map(e => `• **${e.name}** (${e.map})`).join('\n');
             embed.addFields({ name: '✅ Currently Active', value: list });
+        } else {
+            embed.addFields({ name: '✅ Currently Active', value: 'No active events found.' });
         }
 
         if (nextRotation) {
@@ -55,25 +68,31 @@ async function updateEvents() {
             });
         }
 
-        const channel = await client.channels.fetch(CHANNEL_ID);
-        
-        // If you have a LIVE_MESSAGE_ID, edit it. Otherwise, post a new one.
+        // 4. Send or Edit the Message
         if (LIVE_MESSAGE_ID) {
-            const msg = await channel.messages.fetch(LIVE_MESSAGE_ID);
-            await msg.edit({ embeds: [embed] });
+            try {
+                const msg = await channel.messages.fetch(LIVE_MESSAGE_ID);
+                await msg.edit({ embeds: [embed] });
+            } catch (err) {
+                // If message was deleted, send a new one and update the ID
+                console.log("Live message not found, sending a new one...");
+                const sent = await channel.send({ embeds: [embed] });
+                LIVE_MESSAGE_ID = sent.id;
+                console.log(`New Message ID: ${sent.id}`);
+            }
         } else {
             const sent = await channel.send({ embeds: [embed] });
+            LIVE_MESSAGE_ID = sent.id;
             console.log(`Initial message sent! Save this ID to LIVE_MESSAGE_ID in your code: ${sent.id}`);
         }
 
     } catch (error) {
-        console.error('Error fetching API:', error.message);
+        console.error('Error fetching API or updating Discord:', error.message);
     }
 }
 
 client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag}`);
-    // Run immediately, then interval
     updateEvents();
     setInterval(updateEvents, CHECK_INTERVAL);
 });
