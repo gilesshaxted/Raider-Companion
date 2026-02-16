@@ -11,7 +11,8 @@ const {
     ActionRowBuilder,
     StringSelectMenuBuilder,
     GuildScheduledEventPrivacyLevel,
-    GuildScheduledEventEntityType
+    GuildScheduledEventEntityType,
+    ActivityType // Added ActivityType for status presence
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
@@ -648,6 +649,10 @@ client.on('messageCreate', async message => {
 
 client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
+    
+    // Set status presence
+    client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
+    
     await loadAllConfigs();
     await refreshCaches();
     
