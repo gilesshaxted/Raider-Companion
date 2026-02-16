@@ -200,7 +200,8 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
         }
 
         const now = Date.now();
-        const fifteenMinsFromNow = now + (15 * 60 * 1000);
+        const alertWindow = now + (60 * 60 * 1000); // 1 hour for chat pings
+        const scheduleWindow = now + (3 * 60 * 60 * 1000); // 3 hours for Discord Events tab
 
         const guildsToUpdate = targetGuildId 
             ? [[targetGuildId, guildConfigs.get(targetGuildId)]] 
@@ -233,36 +234,15 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 config.activeAlerts = freshAlerts;
             }
 
-            // 2. MULTI-EVENT ALERT LOGIC & SCHEDULED EVENTS
-            const upcomingEvents = events.filter(e => e.startTime > now && e.startTime <= fifteenMinsFromNow);
-            
+            // 2. DISCORD SCHEDULED EVENTS SYNC (Look ahead 3 hours)
             let existingScheduledEvents = [];
             try {
                 existingScheduledEvents = await guild.scheduledEvents.fetch();
             } catch (e) { console.error("Could not fetch scheduled events:", e.message); }
 
-            for (const e of upcomingEvents) {
-                const alertKey = `${e.name}_${e.map}_${e.startTime}`;
-                
-                if (!config.alertedEventKeys) config.alertedEventKeys = [];
-                
-                // PART A: Channel Ping (Only if not alerted yet)
-                if (!config.alertedEventKeys.includes(alertKey)) {
-                    const roleMention = await getOrCreateEventRole(guild, e.name);
-                    const alertSent = await channel.send({
-                        content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!`
-                    });
-                    
-                    config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
-                    config.alertedEventKeys.push(alertKey);
-                    
-                    if (config.alertedEventKeys.length > 50) {
-                        config.alertedEventKeys = config.alertedEventKeys.slice(-50);
-                    }
-                }
-
-                // PART B: Scheduled Event Sync (Ensures native event exists)
-                // This runs every loop, allowing /update to force-create if missing
+            const scorableEvents = events.filter(e => e.startTime > now && e.startTime <= scheduleWindow);
+            
+            for (const e of scorableEvents) {
                 const alreadyScheduled = existingScheduledEvents.some(se => 
                     se.name.includes(e.name) && 
                     Math.abs(se.scheduledStartTimestamp - e.startTime) < 60000
@@ -270,7 +250,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
 
                 if (!alreadyScheduled) {
                     try {
-                        console.log(`Creating native scheduled event for ${e.name} on ${e.map}`);
                         await guild.scheduledEvents.create({
                             name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
                             scheduledStartTime: new Date(e.startTime),
@@ -278,15 +257,35 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                             privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
                             entityType: GuildScheduledEventEntityType.External,
                             entityMetadata: { location: e.map },
-                            description: `In-game event rotation on ${e.map}. Be ready Raiders!`
+                            description: `Upcoming in-game event rotation on ${e.map}. Be ready Raiders!`
                         });
                     } catch (err) {
                         console.error(`Failed to create scheduled event:`, err.message);
                     }
                 }
+
+                // 3. CHANNEL PING LOGIC (Look ahead 1 hour)
+                if (e.startTime <= alertWindow) {
+                    const alertKey = `${e.name}_${e.map}_${e.startTime}`;
+                    if (!config.alertedEventKeys) config.alertedEventKeys = [];
+                    
+                    if (!config.alertedEventKeys.includes(alertKey)) {
+                        const roleMention = await getOrCreateEventRole(guild, e.name);
+                        const alertSent = await channel.send({
+                            content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!`
+                        });
+                        
+                        config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
+                        config.alertedEventKeys.push(alertKey);
+                        
+                        if (config.alertedEventKeys.length > 100) {
+                            config.alertedEventKeys = config.alertedEventKeys.slice(-100);
+                        }
+                    }
+                }
             }
 
-            // 3. LIVE EMBED UPDATES
+            // 4. LIVE EMBED UPDATES
             if (forceNewMessages) {
                 for (const key in config.messageIds) {
                     if (config.messageIds[key]) {
