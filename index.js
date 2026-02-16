@@ -19,7 +19,6 @@ const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
 const CHECK_INTERVAL = 60000;
 
 // Persistent message IDs to track map-specific embeds and the summary
-// On first run, these will be populated and logged to the console.
 let MESSAGE_IDS = {
     'Dam': null,
     'Buried City': null,
@@ -32,24 +31,24 @@ let MESSAGE_IDS = {
 // --- MAP CONFIGURATION ---
 const mapConfigs = {
     'Dam': {
-        color: 0x3498db, // Blue
-        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472980650201055495/map-review-dam-battlegrounds-v0-l547kr11ki1g1.png?ex=69948ba1&is=69933a21&hm=981cef88b54110e3f9205e32ef81e03ea82df7f197b2190afe0d16ba0b392cff&'
+        color: 0x3498db,
+        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472980650201055495/map-review-dam-battlegrounds-v0-l547kr11ki1g1.png'
     },
     'Buried City': {
-        color: 0xe67e22, // Orange
-        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472981360565161985/1200px-Buried_City.png.png?ex=69948c4b&is=69933acb&hm=aba975a349c26806bcea9aa7af76071f48378f125eae321e07d292ba58efb36b&'
+        color: 0xe67e22,
+        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472981360565161985/1200px-Buried_City.png.png'
     },
     'Blue Gate': {
-        color: 0x9b59b6, // Purple
-        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472981803399905361/1200px-Blue_Gate.png.png?ex=69948cb4&is=69933b34&hm=47059437e4f92496cf199d3807a69410e57305932a05743159edd21ad45b18f0&'
+        color: 0x9b59b6,
+        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472981803399905361/1200px-Blue_Gate.png.png'
     },
     'Spaceport': {
-        color: 0x2ecc71, // Green
-        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472981968932311152/71d06f7d82b8b3f8a96f4d8bfe388fa769ed3f5d.png?ex=69948cdc&is=69933b5c&hm=d821036e8fbb3024235dc82a241905d6b4446eac527f727ecc2a5bacacd07e87&'
+        color: 0x2ecc71,
+        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472981968932311152/71d06f7d82b8b3f8a96f4d8bfe388fa769ed3f5d.png'
     },
     'Stella Montis': {
-        color: 0xf1c40f, // Yellow
-        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472982493719298281/ARC-Raiders-Stella-Montis-map-guide.png?ex=69948d59&is=69933bd9&hm=255a9ef15958741ce83e6e4700a9d8894708875e9db2df1f752fa0006dcf9a81&'
+        color: 0xf1c40f,
+        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472982493719298281/ARC-Raiders-Stella-Montis-map-guide.png'
     }
 };
 
@@ -89,10 +88,9 @@ async function updateEvents() {
         if (!channel) return;
 
         // --- 1. GENERATE MAP SPECIFIC EMBEDS ---
-        for (const mapName of Object.keys(mapConfigs)) {
-            const config = mapConfigs[mapName];
+        for (const [mapName, config] of Object.entries(mapConfigs)) {
             
-            // Normalize map names for filtering (e.g. Spaceport vs Space Port)
+            // Normalize map names for filtering
             const mapEvents = events.filter(e => 
                 e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, '')
             );
@@ -106,7 +104,7 @@ async function updateEvents() {
             const embed = new EmbedBuilder()
                 .setTitle(`📍 ${mapName}`)
                 .setColor(config.color)
-                .setImage(config.image)
+                .setImage(config.image) // Ensure main map image is always set
                 .setTimestamp()
                 .setFooter({ text: `Last update` });
 
