@@ -50,7 +50,6 @@ const TRADERS_API_URL = 'https://metaforge.app/api/arc-raiders/traders';
 const QUESTS_API_URL = 'https://metaforge.app/api/arc-raiders/quests';
 const CHECK_INTERVAL = 60000;
 
-// NEW: Store multiple guild configurations in memory
 let guildConfigs = new Map();
 
 const mapConfigs = {
@@ -58,7 +57,7 @@ const mapConfigs = {
     'Buried City': { color: 0xe67e22, image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985571034140704/Buried_City.png' },
     'Blue Gate': { color: 0x9b59b6, image: 'https://cdn.discordapp.com/attachments/1397641556009156658/1472984992203149449/1200px-Blue_Gate.png.png' },
     'Spaceport': { color: 0x2ecc71, image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985777280647319/Spaceport.png' },
-    'Stella Montis': { color: 0xf1c40f, image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472982493719298281/ARC-Raiders-Stella-Montis-map-guide.png' }
+    'Stella Montis': { color: 0xf1c40f, image: 'https://cdn.discordapp.com/attachments/1094953497390231622/1473082346893738106/S2wK7b3dWtuR8x8hYMM2Ga.png' }
 };
 
 const rarityColors = {
@@ -107,9 +106,6 @@ async function ensureAuth() {
     }
 }
 
-/**
- * Gets a unique document reference for a specific guild for this specific bot.
- */
 function getBotConfigDoc(guildId) {
     return doc(db, 'artifacts', appId, 'public', 'data', 'bot_configs', `${CLIENT_ID}_${guildId}`);
 }
@@ -130,10 +126,12 @@ async function loadAllConfigs() {
         const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'bot_configs');
         const querySnapshot = await getDocs(colRef);
         querySnapshot.forEach((doc) => {
-            // Document IDs are in format: CLIENTID_GUILDID
             if (doc.id.startsWith(CLIENT_ID)) {
                 const guildId = doc.id.replace(`${CLIENT_ID}_`, '');
-                guildConfigs.set(guildId, doc.data());
+                const data = doc.data();
+                // Ensure new fields exist for old configs
+                if (!data.alertedEventKeys) data.alertedEventKeys = [];
+                guildConfigs.set(guildId, data);
             }
         });
         console.log(`Loaded configs for ${guildConfigs.size} guilds.`);
@@ -182,7 +180,6 @@ async function getOrCreateEventRole(guild, eventName) {
         }
         return `<@&${role.id}>`;
     } catch (e) {
-        console.error(`Error in getOrCreateEventRole for "${eventName}":`, e.message);
         return `**${eventName}**`;
     }
 }
@@ -203,7 +200,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
         const now = Date.now();
         const fifteenMinsFromNow = now + (15 * 60 * 1000);
 
-        // Filter guilds to update: either a specific one or all known ones
         const guildsToUpdate = targetGuildId 
             ? [[targetGuildId, guildConfigs.get(targetGuildId)]] 
             : Array.from(guildConfigs.entries());
@@ -235,19 +231,29 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 config.activeAlerts = freshAlerts;
             }
 
-            // 2. ALERT LOGIC
-            const overallNext = events
-                .filter(e => e.startTime > now)
-                .sort((a, b) => a.startTime - b.startTime)[0];
-
-            if (overallNext && overallNext.startTime <= fifteenMinsFromNow) {
-                if (config.lastAlertedEventTime !== overallNext.startTime) {
-                    const roleMention = await getOrCreateEventRole(guild, overallNext.name);
+            // 2. MULTI-EVENT ALERT LOGIC
+            const upcomingEvents = events.filter(e => e.startTime > now && e.startTime <= fifteenMinsFromNow);
+            
+            for (const e of upcomingEvents) {
+                // Unique key: EventName + Map + StartTime to prevent duplicates
+                const alertKey = `${e.name}_${e.map}_${e.startTime}`;
+                
+                if (!config.alertedEventKeys) config.alertedEventKeys = [];
+                
+                if (!config.alertedEventKeys.includes(alertKey)) {
+                    console.log(`Pinging for upcoming event: ${e.name} on ${e.map}`);
+                    const roleMention = await getOrCreateEventRole(guild, e.name);
                     const alertSent = await channel.send({
-                        content: `⚠️ **Upcoming Event:** ${getEmoji(overallNext.name)} ${roleMention} starts <t:${Math.floor(overallNext.startTime / 1000)}:R>!`
+                        content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!`
                     });
-                    config.activeAlerts.push({ messageId: alertSent.id, startTime: overallNext.startTime });
-                    config.lastAlertedEventTime = overallNext.startTime;
+                    
+                    config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
+                    config.alertedEventKeys.push(alertKey);
+                    
+                    // Keep the alerted keys list tidy (remove keys older than 1 hour)
+                    if (config.alertedEventKeys.length > 50) {
+                        config.alertedEventKeys = config.alertedEventKeys.slice(-50);
+                    }
                 }
             }
 
@@ -264,7 +270,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 }
             }
 
-            // Maps first
             for (const [mapName, mapSet] of Object.entries(mapConfigs)) {
                 const mapEvents = events.filter(e => e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, ''));
                 const activeEvent = mapEvents.find(e => e.startTime <= now && e.endTime > now);
@@ -291,7 +296,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 await syncMessage(channel, config, mapName, embed);
             }
 
-            // Summary last
             const current = events.filter(e => e.startTime <= now && e.endTime > now);
             const summary = new EmbedBuilder()
                 .setTitle('🛸 ARC Raiders - Live Summary')
@@ -441,10 +445,10 @@ client.on('interactionCreate', async interaction => {
         const targetChannel = interaction.options.getChannel('channel');
         const guildId = interaction.guildId;
         
-        // Initialize or reset this specific guild's config
         const newConfig = {
             channelId: targetChannel.id,
             activeAlerts: [],
+            alertedEventKeys: [], // Initialize tracking array
             lastAlertedEventTime: null,
             messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null }
         };
@@ -544,33 +548,22 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.commandName === 'quests') {
         const questId = interaction.options.getString('name');
-        
         try {
             await interaction.deferReply();
             const res = await axios.get(`${QUESTS_API_URL}?id=${questId}&page=1`);
             const quest = res.data?.data;
-
             if (!quest) return interaction.editReply("❌ Quest data could not be retrieved.");
-
             const embed = new EmbedBuilder()
                 .setTitle(`📜 Quest: ${quest.name}`)
                 .setColor(0x3498db)
                 .setThumbnail(quest.image)
                 .setTimestamp();
-
-            if (quest.trader_name) {
-                embed.addFields({ name: '👤 Giver', value: quest.trader_name, inline: true });
-            }
-
-            if (quest.xp > 0) {
-                embed.addFields({ name: '✨ XP Reward', value: `\`${quest.xp.toLocaleString()}\``, inline: true });
-            }
-
+            if (quest.trader_name) embed.addFields({ name: '👤 Giver', value: quest.trader_name, inline: true });
+            if (quest.xp > 0) embed.addFields({ name: '✨ XP Reward', value: `\`${quest.xp.toLocaleString()}\``, inline: true });
             if (quest.objectives && quest.objectives.length > 0) {
                 const objectiveList = quest.objectives.map(o => `• ${o}`).join('\n');
                 embed.addFields({ name: '🎯 Objectives', value: objectiveList });
             }
-
             let rewardsText = "";
             if (quest.granted_items && quest.granted_items.length > 0) {
                 rewardsText += quest.granted_items.map(r => `✅ **${r.quantity}x** ${r.item.name}`).join('\n') + '\n';
@@ -578,19 +571,13 @@ client.on('interactionCreate', async interaction => {
             if (quest.rewards && quest.rewards.length > 0) {
                 rewardsText += quest.rewards.map(r => `🎁 **${r.quantity}x** ${r.item.name}`).join('\n');
             }
-
-            if (rewardsText) {
-                embed.addFields({ name: '💰 Rewards', value: rewardsText });
-            }
-
+            if (rewardsText) embed.addFields({ name: '💰 Rewards', value: rewardsText });
             if (quest.guide_links && quest.guide_links.length > 0) {
                 const links = quest.guide_links.map(l => `[${l.label}](${l.url})`).join('\n');
                 embed.addFields({ name: '📖 Guides', value: links });
             }
-
             await interaction.editReply({ embeds: [embed] });
         } catch (e) {
-            console.error("Quest lookup error:", e.message);
             await interaction.editReply("❌ An error occurred while fetching quest details.");
         }
     }
