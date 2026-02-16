@@ -12,7 +12,7 @@ const {
     StringSelectMenuBuilder,
     GuildScheduledEventPrivacyLevel,
     GuildScheduledEventEntityType,
-    ActivityType // Added ActivityType for status presence
+    ActivityType 
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
@@ -194,7 +194,6 @@ async function fetchImageBuffer(url) {
     if (!url) return null;
     try {
         const response = await axios.get(url, { responseType: 'arraybuffer' });
-        // Axios returns a Buffer directly in Node.js when responseType is arraybuffer
         return Buffer.from(response.data);
     } catch (err) {
         console.error(`Failed to fetch image for scheduled event: ${url}`, err.message);
@@ -216,8 +215,8 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
         }
 
         const now = Date.now();
-        const alertWindow = now + (60 * 60 * 1000); // 1 hour for chat pings
-        const scheduleWindow = now + (3 * 60 * 60 * 1000); // 3 hours for Discord Events tab
+        const alertWindow = now + (60 * 60 * 1000); 
+        const scheduleWindow = now + (3 * 60 * 60 * 1000); 
 
         const guildsToUpdate = targetGuildId 
             ? [[targetGuildId, guildConfigs.get(targetGuildId)]] 
@@ -253,28 +252,29 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
             // 2. DISCORD SCHEDULED EVENTS SYNC
             let existingScheduledEvents = [];
             try {
+                // Explicitly fetch all scheduled and active events
                 existingScheduledEvents = await guild.scheduledEvents.fetch();
             } catch (e) { console.error("Could not fetch scheduled events:", e.message); }
 
             const scorableEvents = events.filter(e => e.startTime > now && e.startTime <= scheduleWindow);
             
             for (const e of scorableEvents) {
-                const alreadyScheduled = existingScheduledEvents.some(se => 
-                    se.name.includes(e.name) && 
-                    Math.abs(se.scheduledStartTimestamp - e.startTime) < 60000
-                );
+                // FIXED: More robust duplicate detection
+                // We check the specific location metadata AND ensure the name matches
+                const alreadyScheduled = existingScheduledEvents.some(se => {
+                    const sameLocation = se.entityMetadata?.location === e.map;
+                    const nameContainsEvent = se.name.toLowerCase().includes(e.name.toLowerCase());
+                    const sameTimeWindow = Math.abs(se.scheduledStartTimestamp - e.startTime) < 120000; // 2 minute leeway
+                    return sameLocation && nameContainsEvent && sameTimeWindow;
+                });
 
                 if (!alreadyScheduled) {
                     try {
-                        // Locate the map configuration
                         const mapKey = Object.keys(mapConfigs).find(k => 
                             k.toLowerCase().replace(/\s/g, '') === e.map?.toLowerCase().replace(/\s/g, '')
                         );
                         
                         const mapImage = mapKey ? mapConfigs[mapKey].image : null;
-                        console.log(`Syncing event "${e.name}" for map "${e.map}". Image found: ${!!mapImage}`);
-                        
-                        // Fetch the image as a raw Buffer
                         const imageBuffer = await fetchImageBuffer(mapImage);
 
                         await guild.scheduledEvents.create({
@@ -284,12 +284,11 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                             privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
                             entityType: GuildScheduledEventEntityType.External,
                             entityMetadata: { location: e.map },
-                            image: imageBuffer, // Pass Buffer directly
+                            image: imageBuffer, 
                             description: `Upcoming in-game event rotation on ${e.map}. Be ready Raiders!`
                         });
-                        console.log(`Successfully created scheduled event for ${e.name} with cover image.`);
                     } catch (err) {
-                        console.error(`Failed to create scheduled event for ${e.name}:`, err.message);
+                        console.error(`Failed to create scheduled event for ${e.name} on ${e.map}:`, err.message);
                     }
                 }
 
@@ -649,10 +648,7 @@ client.on('messageCreate', async message => {
 
 client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    
-    // Set status presence
     client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
-    
     await loadAllConfigs();
     await refreshCaches();
     
