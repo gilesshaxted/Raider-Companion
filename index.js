@@ -16,7 +16,7 @@ const http = require('http');
 
 // --- FIREBASE WEB SDK SETUP ---
 const { initializeApp } = require('firebase/app');
-const { getFirestore, doc, getDoc, setDoc } = require('firebase/firestore');
+const { getFirestore, doc, getDoc, setDoc, collection, getDocs } = require('firebase/firestore');
 const { getAuth, signInAnonymously } = require('firebase/auth');
 
 const firebaseConfig = {
@@ -50,19 +50,8 @@ const TRADERS_API_URL = 'https://metaforge.app/api/arc-raiders/traders';
 const QUESTS_API_URL = 'https://metaforge.app/api/arc-raiders/quests';
 const CHECK_INTERVAL = 60000;
 
-let config = {
-    channelId: null,
-    activeAlerts: [], 
-    lastAlertedEventTime: null, 
-    messageIds: {
-        'Dam': null,
-        'Buried City': null,
-        'Blue Gate': null,
-        'Spaceport': null,
-        'Stella Montis': null,
-        'Summary': null
-    }
-};
+// NEW: Store multiple guild configurations in memory
+let guildConfigs = new Map();
 
 const mapConfigs = {
     'Dam': { color: 0x3498db, image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985276753121413/l547kr11ki1g1.png' },
@@ -90,9 +79,9 @@ const getEmoji = (name) => eventEmojis[name] || '🛸';
 
 const client = new Client({
     intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        'Guilds',
+        'GuildMessages',
+        'MessageContent'
     ]
 });
 
@@ -101,7 +90,7 @@ let itemCache = [];
 let traderCache = {}; 
 let traderItemsFlat = []; 
 let traderCategories = []; 
-let questCache = []; // List of quest names and IDs
+let questCache = []; 
 let isAuthorized = false;
 let isUpdating = false; 
 
@@ -118,45 +107,53 @@ async function ensureAuth() {
     }
 }
 
-function getBotConfigDoc() {
-    return doc(db, 'artifacts', appId, 'public', 'data', 'bot_configs', CLIENT_ID);
+/**
+ * Gets a unique document reference for a specific guild for this specific bot.
+ */
+function getBotConfigDoc(guildId) {
+    return doc(db, 'artifacts', appId, 'public', 'data', 'bot_configs', `${CLIENT_ID}_${guildId}`);
 }
 
-async function saveConfig() {
+async function saveGuildConfig(guildId) {
     if (!await ensureAuth()) return;
+    const config = guildConfigs.get(guildId);
+    if (!config) return;
     try {
-        // FIXED: Added 'bot' collection segment to ensure an even number of path segments (6 total)
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bot', 'config');
+        const docRef = getBotConfigDoc(guildId);
         await setDoc(docRef, config);
-    } catch (e) { console.error("Error saving config:", e.message); }
+    } catch (e) { console.error(`Error saving config for guild ${guildId}:`, e.message); }
 }
 
-async function loadConfig() {
+async function loadAllConfigs() {
     if (!await ensureAuth()) return;
     try {
-        // FIXED: Added 'bot' collection segment to ensure an even number of path segments (6 total)
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'bot', 'config');
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-            config = { ...config, ...docSnap.data() };
-            console.log(`Config loaded for bot: ${CLIENT_ID}`);
-        } else {
-            console.log(`No existing config found for bot: ${CLIENT_ID}. Starting fresh.`);
-        }
-    } catch (e) { console.error("Error loading config:", e.message); }
+        const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'bot_configs');
+        const querySnapshot = await getDocs(colRef);
+        querySnapshot.forEach((doc) => {
+            // Document IDs are in format: CLIENTID_GUILDID
+            if (doc.id.startsWith(CLIENT_ID)) {
+                const guildId = doc.id.replace(`${CLIENT_ID}_`, '');
+                guildConfigs.set(guildId, doc.data());
+            }
+        });
+        console.log(`Loaded configs for ${guildConfigs.size} guilds.`);
+    } catch (e) { console.error("Error loading configs:", e.message); }
 }
 
 async function refreshCaches() {
     try {
-        const arcRes = await axios.get(ARCS_API_URL);
-        arcCache = arcRes.data?.data || [];
-        
-        const itemRes = await axios.get(ITEMS_API_URL);
-        itemCache = itemRes.data?.data || [];
+        const [arcRes, itemRes, traderRes, questRes] = await Promise.all([
+            axios.get(ARCS_API_URL),
+            axios.get(ITEMS_API_URL),
+            axios.get(TRADERS_API_URL),
+            axios.get(QUESTS_API_URL)
+        ]);
 
-        const traderRes = await axios.get(TRADERS_API_URL);
+        arcCache = arcRes.data?.data || [];
+        itemCache = itemRes.data?.data || [];
         traderCache = traderRes.data?.data || {};
-        
+        questCache = questRes.data?.data || [];
+
         traderItemsFlat = [];
         const cats = new Set();
         for (const [traderName, items] of Object.entries(traderCache)) {
@@ -166,9 +163,6 @@ async function refreshCaches() {
             });
         }
         traderCategories = Array.from(cats);
-
-        const questRes = await axios.get(QUESTS_API_URL);
-        questCache = questRes.data?.data || [];
         
         console.log(`Caches Refreshed: ${arcCache.length} ARCs, ${itemCache.length} Items, ${questCache.length} Quests.`);
     } catch (e) { console.error("Error refreshing caches:", e.message); }
@@ -178,7 +172,6 @@ async function getOrCreateEventRole(guild, eventName) {
     try {
         const roles = await guild.roles.fetch();
         let role = roles.find(r => r.name === eventName);
-        
         if (!role) {
             role = await guild.roles.create({
                 name: eventName,
@@ -195,9 +188,9 @@ async function getOrCreateEventRole(guild, eventName) {
 }
 
 // --- BOT LOGIC ---
-async function updateEvents(forceNewMessages = false) {
-    if (!config.channelId || isUpdating) return;
-    isUpdating = true;
+async function updateEvents(targetGuildId = null, forceNewMessages = false) {
+    if (isUpdating && !targetGuildId) return;
+    if (!targetGuildId) isUpdating = true;
 
     try {
         const response = await axios.get(API_URL);
@@ -209,115 +202,120 @@ async function updateEvents(forceNewMessages = false) {
 
         const now = Date.now();
         const fifteenMinsFromNow = now + (15 * 60 * 1000);
-        
-        let channel;
-        try {
-            channel = await client.channels.fetch(config.channelId);
-        } catch (err) {
-            isUpdating = false;
-            return;
-        }
 
-        if (!channel) {
-            isUpdating = false;
-            return;
-        }
+        // Filter guilds to update: either a specific one or all known ones
+        const guildsToUpdate = targetGuildId 
+            ? [[targetGuildId, guildConfigs.get(targetGuildId)]] 
+            : Array.from(guildConfigs.entries());
 
-        const guild = channel.guild;
+        for (const [guildId, config] of guildsToUpdate) {
+            if (!config || !config.channelId) continue;
 
-        if (config.activeAlerts && config.activeAlerts.length > 0) {
-            const freshAlerts = [];
-            for (const alert of config.activeAlerts) {
-                if (now >= alert.startTime) {
-                    try {
-                        const msg = await channel.messages.fetch(alert.messageId);
-                        await msg.delete();
-                    } catch (err) {}
+            let channel;
+            try {
+                channel = await client.channels.fetch(config.channelId);
+            } catch (err) { continue; }
+            if (!channel) continue;
+
+            const guild = channel.guild;
+
+            // 1. CLEANUP EXPIRED ALERTS
+            if (config.activeAlerts && config.activeAlerts.length > 0) {
+                const freshAlerts = [];
+                for (const alert of config.activeAlerts) {
+                    if (now >= alert.startTime) {
+                        try {
+                            const msg = await channel.messages.fetch(alert.messageId);
+                            await msg.delete();
+                        } catch (err) {}
+                    } else {
+                        freshAlerts.push(alert);
+                    }
+                }
+                config.activeAlerts = freshAlerts;
+            }
+
+            // 2. ALERT LOGIC
+            const overallNext = events
+                .filter(e => e.startTime > now)
+                .sort((a, b) => a.startTime - b.startTime)[0];
+
+            if (overallNext && overallNext.startTime <= fifteenMinsFromNow) {
+                if (config.lastAlertedEventTime !== overallNext.startTime) {
+                    const roleMention = await getOrCreateEventRole(guild, overallNext.name);
+                    const alertSent = await channel.send({
+                        content: `⚠️ **Upcoming Event:** ${getEmoji(overallNext.name)} ${roleMention} starts <t:${Math.floor(overallNext.startTime / 1000)}:R>!`
+                    });
+                    config.activeAlerts.push({ messageId: alertSent.id, startTime: overallNext.startTime });
+                    config.lastAlertedEventTime = overallNext.startTime;
+                }
+            }
+
+            // 3. LIVE EMBED UPDATES
+            if (forceNewMessages) {
+                for (const key in config.messageIds) {
+                    if (config.messageIds[key]) {
+                        try {
+                            const m = await channel.messages.fetch(config.messageIds[key]);
+                            await m.delete();
+                        } catch (e) {}
+                        config.messageIds[key] = null;
+                    }
+                }
+            }
+
+            // Maps first
+            for (const [mapName, mapSet] of Object.entries(mapConfigs)) {
+                const mapEvents = events.filter(e => e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, ''));
+                const activeEvent = mapEvents.find(e => e.startTime <= now && e.endTime > now);
+                const upcoming = mapEvents.filter(e => e.startTime > now).sort((a, b) => a.startTime - b.startTime).slice(0, 3);
+
+                const embed = new EmbedBuilder()
+                    .setTitle(`📍 ${mapName}`)
+                    .setColor(mapSet.color)
+                    .setImage(mapSet.image)
+                    .setTimestamp()
+                    .setFooter({ text: `Last update` });
+
+                if (activeEvent) {
+                    embed.addFields({ name: '📡 Status', value: `🟢 **LIVE:** ${getEmoji(activeEvent.name)} **${activeEvent.name}**\nEnds <t:${Math.floor(activeEvent.endTime / 1000)}:R>` });
+                    if (activeEvent.icon) embed.setThumbnail(activeEvent.icon);
                 } else {
-                    freshAlerts.push(alert);
+                    embed.addFields({ name: '📡 Status', value: '⚪ **Offline**' });
                 }
-            }
-            config.activeAlerts = freshAlerts;
-        }
 
-        const overallNext = events
-            .filter(e => e.startTime > now)
-            .sort((a, b) => a.startTime - b.startTime)[0];
-
-        if (overallNext && overallNext.startTime <= fifteenMinsFromNow) {
-            if (config.lastAlertedEventTime !== overallNext.startTime) {
-                const roleMention = await getOrCreateEventRole(guild, overallNext.name);
-                const alertSent = await channel.send({
-                    content: `⚠️ **Upcoming Event:** ${getEmoji(overallNext.name)} ${roleMention} starts <t:${Math.floor(overallNext.startTime / 1000)}:R>!`
+                upcoming.forEach((e, i) => {
+                    embed.addFields({ name: `Next Up #${i + 1}`, value: `${getEmoji(e.name)} **${e.name}**\n<t:${Math.floor(e.startTime / 1000)}:R>`, inline: true });
                 });
-                config.activeAlerts.push({ messageId: alertSent.id, startTime: overallNext.startTime });
-                config.lastAlertedEventTime = overallNext.startTime;
+
+                await syncMessage(channel, config, mapName, embed);
             }
-        }
 
-        if (forceNewMessages) {
-            for (const key in config.messageIds) {
-                if (config.messageIds[key]) {
-                    try {
-                        const m = await channel.messages.fetch(config.messageIds[key]);
-                        await m.delete();
-                    } catch (e) {}
-                    config.messageIds[key] = null;
-                }
-            }
-        }
+            // Summary last
+            const current = events.filter(e => e.startTime <= now && e.endTime > now);
+            const summary = new EmbedBuilder()
+                .setTitle('🛸 ARC Raiders - Live Summary')
+                .setColor(0x00AE86)
+                .setTimestamp();
 
-        for (const [mapName, mapSet] of Object.entries(mapConfigs)) {
-            const mapEvents = events.filter(e => e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, ''));
-            const activeEvent = mapEvents.find(e => e.startTime <= now && e.endTime > now);
-            const upcoming = mapEvents.filter(e => e.startTime > now).sort((a, b) => a.startTime - b.startTime).slice(0, 3);
-
-            const embed = new EmbedBuilder()
-                .setTitle(`📍 ${mapName}`)
-                .setColor(mapSet.color)
-                .setImage(mapSet.image)
-                .setTimestamp()
-                .setFooter({ text: `Last update` });
-
-            if (activeEvent) {
-                embed.addFields({ name: '📡 Status', value: `🟢 **LIVE:** ${getEmoji(activeEvent.name)} **${activeEvent.name}**\nEnds <t:${Math.floor(activeEvent.endTime / 1000)}:R>` });
-                if (activeEvent.icon) embed.setThumbnail(activeEvent.icon);
+            if (current.length > 0) {
+                summary.addFields({ name: '✅ Currently Active', value: current.map(e => `${getEmoji(e.name)} **${e.name}**\n└ *${e.map}*\n────────────────`).join('\n') });
             } else {
-                embed.addFields({ name: '📡 Status', value: '⚪ **Offline**' });
+                summary.addFields({ name: '✅ Currently Active', value: 'No events currently active.' });
             }
 
-            upcoming.forEach((e, i) => {
-                embed.addFields({ name: `Next Up #${i + 1}`, value: `${getEmoji(e.name)} **${e.name}**\n<t:${Math.floor(e.startTime / 1000)}:R>`, inline: true });
-            });
-
-            await syncMessage(channel, mapName, embed);
+            await syncMessage(channel, config, 'Summary', summary);
+            await saveGuildConfig(guildId);
         }
-
-        const current = events.filter(e => e.startTime <= now && e.endTime > now);
-        const summary = new EmbedBuilder()
-            .setTitle('🛸 ARC Raiders - Live Summary')
-            .setColor(0x00AE86)
-            .setTimestamp();
-
-        if (current.length > 0) {
-            summary.addFields({ name: '✅ Currently Active', value: current.map(e => `${getEmoji(e.name)} **${e.name}**\n└ *${e.map}*\n────────────────`).join('\n') });
-        } else {
-            summary.addFields({ name: '✅ Currently Active', value: 'No events currently active.' });
-        }
-
-        await syncMessage(channel, 'Summary', summary);
-        await saveConfig();
 
     } catch (error) { 
-        if (error.code !== 50001) {
-            console.error('Update loop error:', error.message); 
-        }
+        console.error('Update loop error:', error.message); 
     } finally {
-        isUpdating = false;
+        if (!targetGuildId) isUpdating = false;
     }
 }
 
-async function syncMessage(channel, key, embed) {
+async function syncMessage(channel, config, key, embed) {
     if (config.messageIds[key]) {
         try {
             const msg = await channel.messages.fetch(config.messageIds[key]);
@@ -357,7 +355,7 @@ const commandsData = [
         .toJSON(),
     new SlashCommandBuilder()
         .setName('update')
-        .setDescription('Force a manual update of the live event embeds')
+        .setDescription('Force a manual update of the live event embeds in this guild')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .toJSON(),
     new SlashCommandBuilder()
@@ -441,15 +439,27 @@ client.on('interactionCreate', async interaction => {
     
     if (interaction.commandName === 'setup') {
         const targetChannel = interaction.options.getChannel('channel');
-        config.channelId = targetChannel.id;
-        for (let key in config.messageIds) config.messageIds[key] = null;
-        await interaction.reply({ content: `✅ Events will now be posted and kept current in ${targetChannel}.`, ephemeral: true });
-        updateEvents(true);
+        const guildId = interaction.guildId;
+        
+        // Initialize or reset this specific guild's config
+        const newConfig = {
+            channelId: targetChannel.id,
+            activeAlerts: [],
+            lastAlertedEventTime: null,
+            messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null }
+        };
+        
+        guildConfigs.set(guildId, newConfig);
+        await interaction.reply({ content: `✅ Events will now be posted and kept current in ${targetChannel} for this server.`, ephemeral: true });
+        await updateEvents(guildId, true);
     }
 
     if (interaction.commandName === 'update') {
-        await interaction.reply({ content: '🔄 Forcing update of all event embeds...', ephemeral: true });
-        await updateEvents(true);
+        const guildId = interaction.guildId;
+        if (!guildConfigs.has(guildId)) return interaction.reply({ content: "❌ Please run `/setup` first!", ephemeral: true });
+        
+        await interaction.reply({ content: '🔄 Forcing update of all event embeds in this server...', ephemeral: true });
+        await updateEvents(guildId, true);
     }
 
     if (interaction.commandName === 'arc') {
@@ -561,13 +571,10 @@ client.on('interactionCreate', async interaction => {
                 embed.addFields({ name: '🎯 Objectives', value: objectiveList });
             }
 
-            // Combine granted items and rewards for a complete picture
             let rewardsText = "";
-            
             if (quest.granted_items && quest.granted_items.length > 0) {
                 rewardsText += quest.granted_items.map(r => `✅ **${r.quantity}x** ${r.item.name}`).join('\n') + '\n';
             }
-
             if (quest.rewards && quest.rewards.length > 0) {
                 rewardsText += quest.rewards.map(r => `🎁 **${r.quantity}x** ${r.item.name}`).join('\n');
             }
@@ -590,13 +597,14 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.on('messageCreate', async message => {
-    if (message.author.bot || !config.channelId) return;
-    if (message.channel.id === config.channelId) updateEvents(true);
+    if (message.author.bot) return;
+    const config = guildConfigs.get(message.guildId);
+    if (config && message.channel.id === config.channelId) updateEvents(message.guildId, true);
 });
 
 client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    await loadConfig();
+    await loadAllConfigs();
     await refreshCaches();
     
     const rest = new REST({ version: '10' }).setToken(TOKEN);
