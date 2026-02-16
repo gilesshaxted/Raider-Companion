@@ -10,15 +10,24 @@ const {
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
-const admin = require('firebase-admin');
 
-// --- FIREBASE ADMIN SETUP ---
-if (!admin.apps.length) {
-    admin.initializeApp({
-        projectId: "raider-companion",
-    });
-}
-const db = admin.firestore();
+// --- FIREBASE WEB SDK SETUP ---
+const { initializeApp } = require('firebase/app');
+const { getFirestore, doc, getDoc, setDoc } = require('firebase/firestore');
+const { getAuth, signInAnonymously } = require('firebase/auth');
+
+const firebaseConfig = {
+    apiKey: "AIzaSyDFwBoTXmTxhh3lbDmVLlE7FIgw2syS0fQ",
+    authDomain: "raider-companion.firebaseapp.com",
+    projectId: "raider-companion",
+    storageBucket: "raider-companion.firebasestorage.app",
+    messagingSenderId: "1090143955392",
+    appId: "1:1090143955392:web:37d509027eb7833e3d8025"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
 const appId = 'raider-companion';
 
 // --- KOYEB HEALTH CHECK SERVER ---
@@ -84,23 +93,38 @@ const client = new Client({
 let arcCache = [];
 let itemCache = [];
 let lastAlertedEventTime = null;
+let isAuthorized = false;
 
 // --- PERSISTENCE HELPERS ---
-async function saveConfig() {
+async function ensureAuth() {
+    if (isAuthorized) return true;
     try {
-        const docRef = db.collection('artifacts').doc(appId).collection('public').doc('config');
-        await docRef.set(config);
-    } catch (e) { console.error("Error saving config:", e); }
+        await signInAnonymously(auth);
+        isAuthorized = true;
+        return true;
+    } catch (e) {
+        console.error("Firebase Auth Failed:", e.message);
+        return false;
+    }
+}
+
+async function saveConfig() {
+    if (!await ensureAuth()) return;
+    try {
+        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'config');
+        await setDoc(docRef, config);
+    } catch (e) { console.error("Error saving config:", e.message); }
 }
 
 async function loadConfig() {
+    if (!await ensureAuth()) return;
     try {
-        const docRef = db.collection('artifacts').doc(appId).collection('public').doc('config');
-        const docSnap = await docRef.get();
-        if (docSnap.exists) {
+        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'config');
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
             config = docSnap.data();
         }
-    } catch (e) { console.error("Error loading config:", e); }
+    } catch (e) { console.error("Error loading config:", e.message); }
 }
 
 async function refreshCaches() {
@@ -309,7 +333,6 @@ client.on('interactionCreate', async interaction => {
         if (item.workbench) embed.addFields({ name: 'Crafting', value: `🛠️ ${item.workbench}`, inline: true });
         if (item.loot_area) embed.addFields({ name: 'Loot Area', value: `📍 ${item.loot_area}`, inline: true });
 
-        // Add dynamic Stats if they exist
         if (item.stat_block) {
             const stats = Object.entries(item.stat_block)
                 .filter(([_, v]) => v !== 0 && v !== null && v !== "")
