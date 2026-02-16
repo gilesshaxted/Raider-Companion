@@ -266,7 +266,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
 
                 if (!alreadyScheduled) {
                     try {
-                        // Find matching map image from mapConfigs
                         const mapKey = Object.keys(mapConfigs).find(k => 
                             k.toLowerCase().replace(/\s/g, '') === e.map?.toLowerCase().replace(/\s/g, '')
                         );
@@ -280,7 +279,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                             privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
                             entityType: GuildScheduledEventEntityType.External,
                             entityMetadata: { location: e.map },
-                            image: imageBase64, // Applied cover image
+                            image: imageBase64, 
                             description: `Upcoming in-game event rotation on ${e.map}. Be ready Raiders!`
                         });
                     } catch (err) {
@@ -332,7 +331,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     .setColor(mapSet.color)
                     .setImage(mapSet.image)
                     .setTimestamp()
-                    .setFooter({ text: `Last update` });
+                    .setFooter({ text: `metaforge.app/arc-raiders` }); // Added attribution to map embeds
 
                 if (activeEvent) {
                     embed.addFields({ name: '📡 Status', value: `🟢 **LIVE:** ${getEmoji(activeEvent.name)} **${activeEvent.name}**\nEnds <t:${Math.floor(activeEvent.endTime / 1000)}:R>` });
@@ -352,6 +351,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
             const summary = new EmbedBuilder()
                 .setTitle('🛸 ARC Raiders - Live Summary')
                 .setColor(0x00AE86)
+                .setFooter({ text: `Data provided by metaforge.app/arc-raiders` }) // Added attribution to summary
                 .setTimestamp();
 
             if (current.length > 0) {
