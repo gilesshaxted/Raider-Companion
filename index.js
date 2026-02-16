@@ -187,15 +187,14 @@ async function getOrCreateEventRole(guild, eventName) {
 }
 
 /**
- * Fetches an image from a URL and converts it to a base64 data URI for Discord
+ * Fetches an image from a URL and returns a Buffer for Discord.js
  */
-async function fetchImageAsBase64(url) {
+async function fetchImageBuffer(url) {
     if (!url) return null;
     try {
         const response = await axios.get(url, { responseType: 'arraybuffer' });
-        const buffer = Buffer.from(response.data, 'binary');
-        const contentType = response.headers['content-type'] || 'image/png';
-        return `data:${contentType};base64,${buffer.toString('base64')}`;
+        // Axios returns a Buffer directly in Node.js when responseType is arraybuffer
+        return Buffer.from(response.data);
     } catch (err) {
         console.error(`Failed to fetch image for scheduled event: ${url}`, err.message);
         return null;
@@ -266,11 +265,16 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
 
                 if (!alreadyScheduled) {
                     try {
+                        // Locate the map configuration
                         const mapKey = Object.keys(mapConfigs).find(k => 
                             k.toLowerCase().replace(/\s/g, '') === e.map?.toLowerCase().replace(/\s/g, '')
                         );
+                        
                         const mapImage = mapKey ? mapConfigs[mapKey].image : null;
-                        const imageBase64 = await fetchImageAsBase64(mapImage);
+                        console.log(`Syncing event "${e.name}" for map "${e.map}". Image found: ${!!mapImage}`);
+                        
+                        // Fetch the image as a raw Buffer
+                        const imageBuffer = await fetchImageBuffer(mapImage);
 
                         await guild.scheduledEvents.create({
                             name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
@@ -279,11 +283,12 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                             privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
                             entityType: GuildScheduledEventEntityType.External,
                             entityMetadata: { location: e.map },
-                            image: imageBase64, 
+                            image: imageBuffer, // Pass Buffer directly
                             description: `Upcoming in-game event rotation on ${e.map}. Be ready Raiders!`
                         });
+                        console.log(`Successfully created scheduled event for ${e.name} with cover image.`);
                     } catch (err) {
-                        console.error(`Failed to create scheduled event:`, err.message);
+                        console.error(`Failed to create scheduled event for ${e.name}:`, err.message);
                     }
                 }
 
@@ -331,7 +336,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     .setColor(mapSet.color)
                     .setImage(mapSet.image)
                     .setTimestamp()
-                    .setFooter({ text: `metaforge.app/arc-raiders` }); // Added attribution to map embeds
+                    .setFooter({ text: `metaforge.app/arc-raiders` });
 
                 if (activeEvent) {
                     embed.addFields({ name: '📡 Status', value: `🟢 **LIVE:** ${getEmoji(activeEvent.name)} **${activeEvent.name}**\nEnds <t:${Math.floor(activeEvent.endTime / 1000)}:R>` });
@@ -351,7 +356,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
             const summary = new EmbedBuilder()
                 .setTitle('🛸 ARC Raiders - Live Summary')
                 .setColor(0x00AE86)
-                .setFooter({ text: `Data provided by metaforge.app/arc-raiders` }) // Added attribution to summary
+                .setFooter({ text: `Data provided by metaforge.app/arc-raiders` })
                 .setTimestamp();
 
             if (current.length > 0) {
