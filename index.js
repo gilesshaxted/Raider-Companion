@@ -7,7 +7,9 @@ const {
     Routes, 
     SlashCommandBuilder, 
     PermissionFlagsBits,
-    Events 
+    Events,
+    ActionRowBuilder,
+    StringSelectMenuBuilder
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
@@ -44,10 +46,14 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
 const ARCS_API_URL = 'https://metaforge.app/api/arc-raiders/arcs';
 const ITEMS_API_URL = 'https://metaforge.app/api/arc-raiders/items?limit=1000';
+const TRADERS_API_URL = 'https://metaforge.app/api/arc-raiders/traders';
+const QUESTS_API_URL = 'https://metaforge.app/api/arc-raiders/quests';
 const CHECK_INTERVAL = 60000;
 
 let config = {
     channelId: null,
+    activeAlerts: [], 
+    lastAlertedEventTime: null, 
     messageIds: {
         'Dam': null,
         'Buried City': null,
@@ -92,8 +98,12 @@ const client = new Client({
 
 let arcCache = [];
 let itemCache = [];
-let lastAlertedEventTime = null;
+let traderCache = {}; 
+let traderItemsFlat = []; 
+let traderCategories = []; 
+let questCache = []; // List of quest names and IDs
 let isAuthorized = false;
+let isUpdating = false; 
 
 // --- PERSISTENCE HELPERS ---
 async function ensureAuth() {
@@ -108,12 +118,7 @@ async function ensureAuth() {
     }
 }
 
-/**
- * Gets a unique document reference for this specific bot instance
- * Path: artifacts/raider-companion/public/data/bot_configs/{CLIENT_ID}
- */
 function getBotConfigDoc() {
-    // We use the CLIENT_ID as the document name so Main and Beta bots have separate files
     return doc(db, 'artifacts', appId, 'public', 'data', 'bot_configs', CLIENT_ID);
 }
 
@@ -131,7 +136,7 @@ async function loadConfig() {
         const docRef = getBotConfigDoc();
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
-            config = docSnap.data();
+            config = { ...config, ...docSnap.data() };
             console.log(`Config loaded for bot: ${CLIENT_ID}`);
         } else {
             console.log(`No existing config found for bot: ${CLIENT_ID}. Starting fresh.`);
@@ -146,8 +151,24 @@ async function refreshCaches() {
         
         const itemRes = await axios.get(ITEMS_API_URL);
         itemCache = itemRes.data?.data || [];
+
+        const traderRes = await axios.get(TRADERS_API_URL);
+        traderCache = traderRes.data?.data || {};
         
-        console.log(`Caches Refreshed: ${arcCache.length} ARCs, ${itemCache.length} Items.`);
+        traderItemsFlat = [];
+        const cats = new Set();
+        for (const [traderName, items] of Object.entries(traderCache)) {
+            items.forEach(item => {
+                traderItemsFlat.push({ ...item, traderName });
+                if (item.item_type) cats.add(item.item_type);
+            });
+        }
+        traderCategories = Array.from(cats);
+
+        const questRes = await axios.get(QUESTS_API_URL);
+        questCache = questRes.data?.data || [];
+        
+        console.log(`Caches Refreshed: ${arcCache.length} ARCs, ${itemCache.length} Items, ${questCache.length} Quests.`);
     } catch (e) { console.error("Error refreshing caches:", e.message); }
 }
 
@@ -173,12 +194,16 @@ async function getOrCreateEventRole(guild, eventName) {
 
 // --- BOT LOGIC ---
 async function updateEvents(forceNewMessages = false) {
-    if (!config.channelId) return;
+    if (!config.channelId || isUpdating) return;
+    isUpdating = true;
 
     try {
         const response = await axios.get(API_URL);
         const events = response.data?.data;
-        if (!events || !Array.isArray(events)) return;
+        if (!events || !Array.isArray(events)) {
+            isUpdating = false;
+            return;
+        }
 
         const now = Date.now();
         const fifteenMinsFromNow = now + (15 * 60 * 1000);
@@ -187,25 +212,44 @@ async function updateEvents(forceNewMessages = false) {
         try {
             channel = await client.channels.fetch(config.channelId);
         } catch (err) {
-            // Silently stop if we can't access the channel (this prevents loop crashes)
+            isUpdating = false;
             return;
         }
 
-        if (!channel) return;
+        if (!channel) {
+            isUpdating = false;
+            return;
+        }
 
         const guild = channel.guild;
+
+        if (config.activeAlerts && config.activeAlerts.length > 0) {
+            const freshAlerts = [];
+            for (const alert of config.activeAlerts) {
+                if (now >= alert.startTime) {
+                    try {
+                        const msg = await channel.messages.fetch(alert.messageId);
+                        await msg.delete();
+                    } catch (err) {}
+                } else {
+                    freshAlerts.push(alert);
+                }
+            }
+            config.activeAlerts = freshAlerts;
+        }
 
         const overallNext = events
             .filter(e => e.startTime > now)
             .sort((a, b) => a.startTime - b.startTime)[0];
 
         if (overallNext && overallNext.startTime <= fifteenMinsFromNow) {
-            if (lastAlertedEventTime !== overallNext.startTime) {
+            if (config.lastAlertedEventTime !== overallNext.startTime) {
                 const roleMention = await getOrCreateEventRole(guild, overallNext.name);
-                await channel.send({
+                const alertSent = await channel.send({
                     content: `⚠️ **Upcoming Event:** ${getEmoji(overallNext.name)} ${roleMention} starts <t:${Math.floor(overallNext.startTime / 1000)}:R>!`
                 });
-                lastAlertedEventTime = overallNext.startTime;
+                config.activeAlerts.push({ messageId: alertSent.id, startTime: overallNext.startTime });
+                config.lastAlertedEventTime = overallNext.startTime;
             }
         }
 
@@ -266,6 +310,8 @@ async function updateEvents(forceNewMessages = false) {
         if (error.code !== 50001) {
             console.error('Update loop error:', error.message); 
         }
+    } finally {
+        isUpdating = false;
     }
 }
 
@@ -284,7 +330,22 @@ async function syncMessage(channel, key, embed) {
     }
 }
 
-// --- COMMAND DATA ---
+function buildTraderItemEmbed(item) {
+    return new EmbedBuilder()
+        .setTitle(`📦 Trader Item: ${item.name}`)
+        .setDescription(item.description || "No description provided.")
+        .setColor(rarityColors[item.rarity] || 0x5865F2)
+        .setThumbnail(item.icon)
+        .addFields(
+            { name: 'Seller', value: `👤 ${item.traderName}`, inline: true },
+            { name: 'Trader Price', value: `🪙 ${item.trader_price.toLocaleString()}`, inline: true },
+            { name: 'Base Value', value: `🪙 ${item.value.toLocaleString()}`, inline: true },
+            { name: 'Rarity', value: item.rarity, inline: true },
+            { name: 'Category', value: item.item_type, inline: true }
+        )
+        .setTimestamp();
+}
+
 const commandsData = [
     new SlashCommandBuilder()
         .setName('setup')
@@ -306,19 +367,70 @@ const commandsData = [
         .setName('item')
         .setDescription('Lookup an item, weapon, or material')
         .addStringOption(option => option.setName('name').setDescription('Search for an item').setRequired(true).setAutocomplete(true))
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('traders')
+        .setDescription('View trader inventories or find where an item is sold')
+        .addStringOption(option => 
+            option.setName('name')
+                .setDescription('Search for a Trader or Category (e.g. Weapon)')
+                .setRequired(true)
+                .setAutocomplete(true))
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('quests')
+        .setDescription('View detailed objectives and rewards for ARC Raiders quests')
+        .addStringOption(option => 
+            option.setName('name')
+                .setDescription('Search for a quest name')
+                .setRequired(true)
+                .setAutocomplete(true))
         .toJSON()
 ];
 
 client.on('interactionCreate', async interaction => {
     if (interaction.isAutocomplete()) {
         const focusedValue = interaction.options.getFocused().toLowerCase();
+        
         if (interaction.commandName === 'arc') {
             const choices = arcCache.filter(arc => arc.name.toLowerCase().includes(focusedValue));
             await interaction.respond(choices.slice(0, 25).map(arc => ({ name: arc.name, value: arc.id })));
         }
+        
         if (interaction.commandName === 'item') {
             const choices = itemCache.filter(item => item.name.toLowerCase().includes(focusedValue));
             await interaction.respond(choices.slice(0, 25).map(item => ({ name: item.name, value: item.id })));
+        }
+
+        if (interaction.commandName === 'traders') {
+            const results = [];
+            Object.keys(traderCache).forEach(name => {
+                if (name.toLowerCase().includes(focusedValue)) {
+                    results.push({ name: `👤 Trader: ${name}`, value: `trader:${name}` });
+                }
+            });
+            traderCategories.forEach(cat => {
+                if (cat.toLowerCase().includes(focusedValue)) {
+                    results.push({ name: `📁 Category: ${cat}`, value: `category:${cat}` });
+                }
+            });
+            await interaction.respond(results.slice(0, 25));
+        }
+
+        if (interaction.commandName === 'quests') {
+            const choices = questCache.filter(q => q.name.toLowerCase().includes(focusedValue));
+            await interaction.respond(choices.slice(0, 25).map(q => ({ name: q.name, value: q.id })));
+        }
+        return;
+    }
+
+    if (interaction.isStringSelectMenu()) {
+        if (interaction.customId === 'trader_item_select') {
+            const itemId = interaction.values[0];
+            const item = traderItemsFlat.find(i => i.id === itemId);
+            if (item) {
+                await interaction.reply({ embeds: [buildTraderItemEmbed(item)], ephemeral: true });
+            }
         }
         return;
     }
@@ -378,9 +490,100 @@ client.on('interactionCreate', async interaction => {
             if (stats) embed.addFields({ name: '📊 Statistics', value: stats });
         }
 
-        if (item.flavor_text) embed.setFooter({ text: item.flavor_text });
-
         await interaction.reply({ embeds: [embed] });
+    }
+
+    if (interaction.commandName === 'traders') {
+        const selection = interaction.options.getString('name');
+        
+        if (selection.startsWith('category:')) {
+            const catName = selection.split(':')[1];
+            const items = traderItemsFlat.filter(i => i.item_type === catName);
+            if (items.length === 0) return interaction.reply({ content: "❌ No trader items found in this category.", ephemeral: true });
+            const list = items.map(i => `• **${i.name}** sold by **${i.traderName}** (🪙 ${i.trader_price.toLocaleString()})`).join('\n');
+            const embed = new EmbedBuilder()
+                .setTitle(`📁 Browsing Category: ${catName}`)
+                .setDescription(list)
+                .setColor(0x3498db);
+            const select = new StringSelectMenuBuilder()
+                .setCustomId('trader_item_select')
+                .setPlaceholder('Select an item to see details...')
+                .addOptions(items.slice(0, 25).map(i => ({ label: i.name, description: `Seller: ${i.traderName} | Price: ${i.trader_price}`, value: i.id })));
+            const row = new ActionRowBuilder().addComponents(select);
+            await interaction.reply({ embeds: [embed], components: [row] });
+        }
+        else if (selection.startsWith('trader:')) {
+            const traderName = selection.split(':')[1];
+            const items = traderCache[traderName];
+            if (!items) return interaction.reply({ content: "❌ Trader not found.", ephemeral: true });
+            const inventoryList = items.map(i => `• **${i.name}**\n└ 🪙 ${i.trader_price.toLocaleString()} (${i.rarity})`).join('\n');
+            const embed = new EmbedBuilder()
+                .setTitle(`👤 Trader Inventory: ${traderName}`)
+                .setDescription(inventoryList || 'This trader is currently out of stock.')
+                .setColor(0x00AE86);
+            const select = new StringSelectMenuBuilder()
+                .setCustomId('trader_item_select')
+                .setPlaceholder(`Select one of ${traderName}'s items...`)
+                .addOptions(items.slice(0, 25).map(i => ({ label: i.name, description: `Type: ${i.item_type} | Price: ${i.trader_price}`, value: i.id })));
+            const row = new ActionRowBuilder().addComponents(select);
+            await interaction.reply({ embeds: [embed], components: [row] });
+        } 
+    }
+
+    if (interaction.commandName === 'quests') {
+        const questId = interaction.options.getString('name');
+        
+        try {
+            await interaction.deferReply();
+            const res = await axios.get(`${QUESTS_API_URL}?id=${questId}&page=1`);
+            const quest = res.data?.data;
+
+            if (!quest) return interaction.editReply("❌ Quest data could not be retrieved.");
+
+            const embed = new EmbedBuilder()
+                .setTitle(`📜 Quest: ${quest.name}`)
+                .setColor(0x3498db)
+                .setThumbnail(quest.image)
+                .setTimestamp();
+
+            if (quest.trader_name) {
+                embed.addFields({ name: '👤 Giver', value: quest.trader_name, inline: true });
+            }
+
+            if (quest.xp > 0) {
+                embed.addFields({ name: '✨ XP Reward', value: `\`${quest.xp.toLocaleString()}\``, inline: true });
+            }
+
+            if (quest.objectives && quest.objectives.length > 0) {
+                const objectiveList = quest.objectives.map(o => `• ${o}`).join('\n');
+                embed.addFields({ name: '🎯 Objectives', value: objectiveList });
+            }
+
+            // Combine granted items and rewards for a complete picture
+            let rewardsText = "";
+            
+            if (quest.granted_items && quest.granted_items.length > 0) {
+                rewardsText += quest.granted_items.map(r => `✅ **${r.quantity}x** ${r.item.name}`).join('\n') + '\n';
+            }
+
+            if (quest.rewards && quest.rewards.length > 0) {
+                rewardsText += quest.rewards.map(r => `🎁 **${r.quantity}x** ${r.item.name}`).join('\n');
+            }
+
+            if (rewardsText) {
+                embed.addFields({ name: '💰 Rewards', value: rewardsText });
+            }
+
+            if (quest.guide_links && quest.guide_links.length > 0) {
+                const links = quest.guide_links.map(l => `[${l.label}](${l.url})`).join('\n');
+                embed.addFields({ name: '📖 Guides', value: links });
+            }
+
+            await interaction.editReply({ embeds: [embed] });
+        } catch (e) {
+            console.error("Quest lookup error:", e.message);
+            await interaction.editReply("❌ An error occurred while fetching quest details.");
+        }
     }
 });
 
