@@ -2,8 +2,9 @@ const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const axios = require('axios');
 
 // --- CONFIGURATION ---
-const TOKEN = 'YOUR_DISCORD_BOT_TOKEN';
-const CHANNEL_ID = 'YOUR_CHANNEL_ID'; // Channel for alerts and live status
+// We use process.env to keep your token secret when hosting on GitHub
+const TOKEN = process.env.DISCORD_TOKEN; 
+const CHANNEL_ID = '1077242377099550863'; // Channel for alerts and live status
 const LIVE_MESSAGE_ID = null; // Set this after the first run to keep updating ONE message
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
 const CHECK_INTERVAL = 60000; // Check every 60 seconds
@@ -62,7 +63,7 @@ async function updateEvents() {
             await msg.edit({ embeds: [embed] });
         } else {
             const sent = await channel.send({ embeds: [embed] });
-            console.log(`Initial message sent! Save this ID to LIVE_MESSAGE_ID: ${sent.id}`);
+            console.log(`Initial message sent! Save this ID to LIVE_MESSAGE_ID in your code: ${sent.id}`);
         }
 
     } catch (error) {
