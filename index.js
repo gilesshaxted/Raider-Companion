@@ -9,7 +9,9 @@ const {
     PermissionFlagsBits,
     Events,
     ActionRowBuilder,
-    StringSelectMenuBuilder
+    StringSelectMenuBuilder,
+    GuildScheduledEventPrivacyLevel,
+    GuildScheduledEventEntityType
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
@@ -57,7 +59,7 @@ const mapConfigs = {
     'Buried City': { color: 0xe67e22, image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985571034140704/Buried_City.png' },
     'Blue Gate': { color: 0x9b59b6, image: 'https://cdn.discordapp.com/attachments/1397641556009156658/1472984992203149449/1200px-Blue_Gate.png.png' },
     'Spaceport': { color: 0x2ecc71, image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985777280647319/Spaceport.png' },
-    'Stella Montis': { color: 0xf1c40f, image: 'https://cdn.discordapp.com/attachments/1094953497390231622/1473082346893738106/S2wK7b3dWtuR8x8hYMM2Ga.png' }
+    'Stella Montis': { color: 0xf1c40f, image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472982493719298281/ARC-Raiders-Stella-Montis-map-guide.png' }
 };
 
 const rarityColors = {
@@ -80,7 +82,8 @@ const client = new Client({
     intents: [
         'Guilds',
         'GuildMessages',
-        'MessageContent'
+        'MessageContent',
+        'GuildScheduledEvents' // Added for native event creation
     ]
 });
 
@@ -129,7 +132,6 @@ async function loadAllConfigs() {
             if (doc.id.startsWith(CLIENT_ID)) {
                 const guildId = doc.id.replace(`${CLIENT_ID}_`, '');
                 const data = doc.data();
-                // Ensure new fields exist for old configs
                 if (!data.alertedEventKeys) data.alertedEventKeys = [];
                 guildConfigs.set(guildId, data);
             }
@@ -231,17 +233,22 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 config.activeAlerts = freshAlerts;
             }
 
-            // 2. MULTI-EVENT ALERT LOGIC
+            // 2. MULTI-EVENT ALERT LOGIC & SCHEDULED EVENTS
             const upcomingEvents = events.filter(e => e.startTime > now && e.startTime <= fifteenMinsFromNow);
             
+            // Fetch existing Discord scheduled events to avoid duplication
+            let existingScheduledEvents = [];
+            try {
+                existingScheduledEvents = await guild.scheduledEvents.fetch();
+            } catch (e) { console.error("Could not fetch scheduled events:", e.message); }
+
             for (const e of upcomingEvents) {
-                // Unique key: EventName + Map + StartTime to prevent duplicates
                 const alertKey = `${e.name}_${e.map}_${e.startTime}`;
                 
                 if (!config.alertedEventKeys) config.alertedEventKeys = [];
                 
                 if (!config.alertedEventKeys.includes(alertKey)) {
-                    console.log(`Pinging for upcoming event: ${e.name} on ${e.map}`);
+                    // Send Channel Ping
                     const roleMention = await getOrCreateEventRole(guild, e.name);
                     const alertSent = await channel.send({
                         content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!`
@@ -249,8 +256,29 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     
                     config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
                     config.alertedEventKeys.push(alertKey);
+
+                    // Create Native Discord Scheduled Event
+                    const alreadyScheduled = existingScheduledEvents.some(se => 
+                        se.name.includes(e.name) && 
+                        Math.abs(se.scheduledStartTimestamp - e.startTime) < 60000
+                    );
+
+                    if (!alreadyScheduled) {
+                        try {
+                            await guild.scheduledEvents.create({
+                                name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
+                                scheduledStartTime: new Date(e.startTime),
+                                scheduledEndTime: new Date(e.endTime),
+                                privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+                                entityType: GuildScheduledEventEntityType.External,
+                                entityMetadata: { location: e.map },
+                                description: `In-game event rotation on ${e.map}. Be ready Raiders!`
+                            });
+                        } catch (err) {
+                            console.error(`Failed to create scheduled event for ${e.name}:`, err.message);
+                        }
+                    }
                     
-                    // Keep the alerted keys list tidy (remove keys older than 1 hour)
                     if (config.alertedEventKeys.length > 50) {
                         config.alertedEventKeys = config.alertedEventKeys.slice(-50);
                     }
@@ -448,7 +476,7 @@ client.on('interactionCreate', async interaction => {
         const newConfig = {
             channelId: targetChannel.id,
             activeAlerts: [],
-            alertedEventKeys: [], // Initialize tracking array
+            alertedEventKeys: [], 
             lastAlertedEventTime: null,
             messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null }
         };
