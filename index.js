@@ -31,7 +31,6 @@ http.createServer((req, res) => {
 // --- CONFIGURATION ---
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID; // Recommended: Set this in your .env for instant updates
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
 const CHECK_INTERVAL = 60000;
 
@@ -208,18 +207,24 @@ client.once('ready', async () => {
     
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
-        console.log('Started refreshing application (/) commands.');
+        console.log('Started refreshing guild-specific application (/) commands.');
 
-        // 1. Register GUILD commands (Instant appearance in your test server)
-        if (GUILD_ID) {
-            await rest.put(
-                Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-                { body: commandsData }
-            );
-            console.log(`Successfully reloaded guild commands for: ${GUILD_ID}`);
+        // Refresh commands for EVERY guild the bot is currently in.
+        // This ensures the /setup command appears instantly after a restart.
+        const guilds = client.guilds.cache;
+        for (const [guildId, guild] of guilds) {
+            try {
+                await rest.put(
+                    Routes.applicationGuildCommands(CLIENT_ID, guildId),
+                    { body: commandsData }
+                );
+                console.log(`Successfully reloaded commands for guild: ${guild.name} (${guildId})`);
+            } catch (err) {
+                console.error(`Failed to refresh commands for guild ${guildId}:`, err.message);
+            }
         }
 
-        // 2. Register GLOBAL commands (Appears in all servers after ~1 hour)
+        // Global registration as a long-term backup
         await rest.put(
             Routes.applicationCommands(CLIENT_ID),
             { body: commandsData }
@@ -227,7 +232,7 @@ client.once('ready', async () => {
         console.log('Successfully reloaded global application (/) commands.');
 
     } catch (e) { 
-        console.error('Error registering commands:', e); 
+        console.error('Error in command registration loop:', e); 
     }
 
     updateEvents();
