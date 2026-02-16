@@ -32,6 +32,7 @@ http.createServer((req, res) => {
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
+const ARCS_API_URL = 'https://metaforge.app/api/arc-raiders/arcs';
 const CHECK_INTERVAL = 60000;
 
 let config = {
@@ -66,6 +67,9 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
+// Cache for Arc data to power autocomplete and commands
+let arcCache = [];
+
 // --- PERSISTENCE HELPERS ---
 async function saveConfig() {
     try {
@@ -82,6 +86,15 @@ async function loadConfig() {
             config = docSnap.data();
         }
     } catch (e) { console.error("Error loading config:", e); }
+}
+
+// Fetch and cache Arc definitions
+async function refreshArcCache() {
+    try {
+        const response = await axios.get(ARCS_API_URL);
+        arcCache = response.data?.data || [];
+        console.log(`Cached ${arcCache.length} ARCs.`);
+    } catch (e) { console.error("Error fetching Arcs:", e.message); }
 }
 
 // --- BOT LOGIC ---
@@ -178,10 +191,31 @@ const commandsData = [
                 .setDescription('The channel to post in')
                 .setRequired(true))
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('arc')
+        .setDescription('Get detailed intelligence on a specific ARC unit')
+        .addStringOption(option =>
+            option.setName('unit')
+                .setDescription('Pick an ARC unit')
+                .setRequired(true)
+                .setAutocomplete(true))
         .toJSON()
 ];
 
 client.on('interactionCreate', async interaction => {
+    // Handle Autocomplete for /arc
+    if (interaction.isAutocomplete()) {
+        if (interaction.commandName === 'arc') {
+            const focusedValue = interaction.options.getFocused().toLowerCase();
+            const choices = arcCache.filter(arc => arc.name.toLowerCase().includes(focusedValue));
+            await interaction.respond(
+                choices.slice(0, 25).map(arc => ({ name: arc.name, value: arc.id }))
+            );
+        }
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
     
     if (interaction.commandName === 'setup') {
@@ -191,6 +225,26 @@ client.on('interactionCreate', async interaction => {
         
         await interaction.reply({ content: `✅ Events will now be posted and kept current in ${targetChannel}.`, ephemeral: true });
         updateEvents();
+    }
+
+    if (interaction.commandName === 'arc') {
+        const arcId = interaction.options.getString('unit');
+        const arc = arcCache.find(a => a.id === arcId);
+
+        if (!arc) {
+            return interaction.reply({ content: "❌ Unit intelligence not found. Please pick a valid unit from the list.", ephemeral: true });
+        }
+
+        const embed = new EmbedBuilder()
+            .setTitle(`🤖 Intelligence: ${arc.name}`)
+            .setDescription(arc.description)
+            .setColor(0x5865F2)
+            .setThumbnail(arc.icon)
+            .setImage(arc.image)
+            .setTimestamp()
+            .setFooter({ text: 'ARC Intelligence Database' });
+
+        await interaction.reply({ embeds: [embed] });
     }
 });
 
@@ -204,13 +258,10 @@ client.on('messageCreate', async message => {
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     await loadConfig();
+    await refreshArcCache();
     
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
-        console.log('Started refreshing guild-specific application (/) commands.');
-
-        // Refresh commands for EVERY guild the bot is currently in.
-        // This ensures the /setup command appears instantly after a restart.
         const guilds = client.guilds.cache;
         for (const [guildId, guild] of guilds) {
             try {
@@ -218,22 +269,13 @@ client.once('ready', async () => {
                     Routes.applicationGuildCommands(CLIENT_ID, guildId),
                     { body: commandsData }
                 );
-                console.log(`Successfully reloaded commands for guild: ${guild.name} (${guildId})`);
-            } catch (err) {
-                console.error(`Failed to refresh commands for guild ${guildId}:`, err.message);
-            }
+            } catch (err) { console.error(`Guild refresh fail for ${guildId}:`, err.message); }
         }
+        
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
+        console.log('Slash commands refreshed everywhere.');
 
-        // Global registration as a long-term backup
-        await rest.put(
-            Routes.applicationCommands(CLIENT_ID),
-            { body: commandsData }
-        );
-        console.log('Successfully reloaded global application (/) commands.');
-
-    } catch (e) { 
-        console.error('Error in command registration loop:', e); 
-    }
+    } catch (e) { console.error('Command registration fail:', e); }
 
     updateEvents();
     setInterval(updateEvents, CHECK_INTERVAL);
