@@ -6,7 +6,8 @@ const {
     REST, 
     Routes, 
     SlashCommandBuilder, 
-    PermissionFlagsBits 
+    PermissionFlagsBits,
+    Events 
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
@@ -83,10 +84,9 @@ const getEmoji = (name) => eventEmojis[name] || '🛸';
 
 const client = new Client({
     intents: [
-        GatewayIntentBits.Guilds, 
-        GatewayIntentBits.GuildMessages, 
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildRoles
+        'Guilds',
+        'GuildMessages',
+        'MessageContent'
     ]
 });
 
@@ -108,10 +108,19 @@ async function ensureAuth() {
     }
 }
 
+/**
+ * Gets a unique document reference for this specific bot instance
+ * Path: artifacts/raider-companion/public/data/bot_configs/{CLIENT_ID}
+ */
+function getBotConfigDoc() {
+    // We use the CLIENT_ID as the document name so Main and Beta bots have separate files
+    return doc(db, 'artifacts', appId, 'public', 'data', 'bot_configs', CLIENT_ID);
+}
+
 async function saveConfig() {
     if (!await ensureAuth()) return;
     try {
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'config');
+        const docRef = getBotConfigDoc();
         await setDoc(docRef, config);
     } catch (e) { console.error("Error saving config:", e.message); }
 }
@@ -119,10 +128,13 @@ async function saveConfig() {
 async function loadConfig() {
     if (!await ensureAuth()) return;
     try {
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'config');
+        const docRef = getBotConfigDoc();
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
             config = docSnap.data();
+            console.log(`Config loaded for bot: ${CLIENT_ID}`);
+        } else {
+            console.log(`No existing config found for bot: ${CLIENT_ID}. Starting fresh.`);
         }
     } catch (e) { console.error("Error loading config:", e.message); }
 }
@@ -140,19 +152,23 @@ async function refreshCaches() {
 }
 
 async function getOrCreateEventRole(guild, eventName) {
-    let role = guild.roles.cache.find(r => r.name === eventName);
-    if (!role) {
-        try {
+    try {
+        const roles = await guild.roles.fetch();
+        let role = roles.find(r => r.name === eventName);
+        
+        if (!role) {
             role = await guild.roles.create({
                 name: eventName,
                 reason: 'Auto-created for ARC Raiders rotation alerts',
-                mentionable: true
+                mentionable: true,
+                color: 0x5865F2
             });
-        } catch (e) {
-            return `**${eventName}**`;
         }
+        return `<@&${role.id}>`;
+    } catch (e) {
+        console.error(`Error in getOrCreateEventRole for "${eventName}":`, e.message);
+        return `**${eventName}**`;
     }
-    return `<@&${role.id}>`;
 }
 
 // --- BOT LOGIC ---
@@ -167,7 +183,14 @@ async function updateEvents(forceNewMessages = false) {
         const now = Date.now();
         const fifteenMinsFromNow = now + (15 * 60 * 1000);
         
-        const channel = await client.channels.fetch(config.channelId);
+        let channel;
+        try {
+            channel = await client.channels.fetch(config.channelId);
+        } catch (err) {
+            // Silently stop if we can't access the channel (this prevents loop crashes)
+            return;
+        }
+
         if (!channel) return;
 
         const guild = channel.guild;
@@ -239,7 +262,11 @@ async function updateEvents(forceNewMessages = false) {
         await syncMessage(channel, 'Summary', summary);
         await saveConfig();
 
-    } catch (error) { console.error('Update loop error:', error.message); }
+    } catch (error) { 
+        if (error.code !== 50001) {
+            console.error('Update loop error:', error.message); 
+        }
+    }
 }
 
 async function syncMessage(channel, key, embed) {
@@ -263,6 +290,11 @@ const commandsData = [
         .setName('setup')
         .setDescription('Set the channel for live event updates')
         .addChannelOption(option => option.setName('channel').setDescription('The channel to post in').setRequired(true))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('update')
+        .setDescription('Force a manual update of the live event embeds')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .toJSON(),
     new SlashCommandBuilder()
@@ -298,7 +330,12 @@ client.on('interactionCreate', async interaction => {
         config.channelId = targetChannel.id;
         for (let key in config.messageIds) config.messageIds[key] = null;
         await interaction.reply({ content: `✅ Events will now be posted and kept current in ${targetChannel}.`, ephemeral: true });
-        updateEvents();
+        updateEvents(true);
+    }
+
+    if (interaction.commandName === 'update') {
+        await interaction.reply({ content: '🔄 Forcing update of all event embeds...', ephemeral: true });
+        await updateEvents(true);
     }
 
     if (interaction.commandName === 'arc') {
@@ -352,7 +389,7 @@ client.on('messageCreate', async message => {
     if (message.channel.id === config.channelId) updateEvents(true);
 });
 
-client.once('ready', async () => {
+client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
     await loadConfig();
     await refreshCaches();
