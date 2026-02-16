@@ -64,11 +64,16 @@ const eventEmojis = {
 const getEmoji = (name) => eventEmojis[name] || '🛸';
 
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+    intents: [
+        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.GuildMessages, 
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildRoles
+    ]
 });
 
-// Cache for Arc data to power autocomplete and commands
 let arcCache = [];
+let lastAlertedEventTime = null;
 
 // --- PERSISTENCE HELPERS ---
 async function saveConfig() {
@@ -88,13 +93,33 @@ async function loadConfig() {
     } catch (e) { console.error("Error loading config:", e); }
 }
 
-// Fetch and cache Arc definitions
 async function refreshArcCache() {
     try {
         const response = await axios.get(ARCS_API_URL);
         arcCache = response.data?.data || [];
         console.log(`Cached ${arcCache.length} ARCs.`);
     } catch (e) { console.error("Error fetching Arcs:", e.message); }
+}
+
+/**
+ * Ensures a role exists for an event and returns its mention string.
+ */
+async function getOrCreateEventRole(guild, eventName) {
+    let role = guild.roles.cache.find(r => r.name === eventName);
+    if (!role) {
+        try {
+            role = await guild.roles.create({
+                name: eventName,
+                reason: 'Auto-created for ARC Raiders rotation alerts',
+                mentionable: true
+            });
+            console.log(`Created new role: ${eventName}`);
+        } catch (e) {
+            console.error(`Failed to create role for ${eventName}:`, e.message);
+            return `**${eventName}**`; // Fallback to bold text
+        }
+    }
+    return `<@&${role.id}>`;
 }
 
 // --- BOT LOGIC ---
@@ -107,9 +132,30 @@ async function updateEvents(forceNewMessages = false) {
         if (!events || !Array.isArray(events)) return;
 
         const now = Date.now();
+        const fifteenMinsFromNow = now + (15 * 60 * 1000);
+        
         const channel = await client.channels.fetch(config.channelId);
         if (!channel) return;
 
+        const guild = channel.guild;
+
+        // 1. Alert Logic (Non-embed message with Role Ping)
+        // Find the next rotation overall
+        const overallNext = events
+            .filter(e => e.startTime > now)
+            .sort((a, b) => a.startTime - b.startTime)[0];
+
+        if (overallNext && overallNext.startTime <= fifteenMinsFromNow) {
+            if (lastAlertedEventTime !== overallNext.startTime) {
+                const roleMention = await getOrCreateEventRole(guild, overallNext.name);
+                await channel.send({
+                    content: `⚠️ **Upcoming Event:** ${getEmoji(overallNext.name)} ${roleMention} starts <t:${Math.floor(overallNext.startTime / 1000)}:R>!`
+                });
+                lastAlertedEventTime = overallNext.startTime;
+            }
+        }
+
+        // 2. Map Management
         if (forceNewMessages) {
             for (const key in config.messageIds) {
                 if (config.messageIds[key]) {
@@ -204,7 +250,6 @@ const commandsData = [
 ];
 
 client.on('interactionCreate', async interaction => {
-    // Handle Autocomplete for /arc
     if (interaction.isAutocomplete()) {
         if (interaction.commandName === 'arc') {
             const focusedValue = interaction.options.getFocused().toLowerCase();
