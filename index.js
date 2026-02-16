@@ -13,13 +13,9 @@ const http = require('http');
 const admin = require('firebase-admin');
 
 // --- FIREBASE ADMIN SETUP ---
-// We use your project credentials to initialize the Admin SDK.
-// This allows the bot to securely read/write to Firestore as a backend service.
 if (!admin.apps.length) {
     admin.initializeApp({
         projectId: "raider-companion",
-        // The Admin SDK uses internal authentication. For Koyeb/Local, 
-        // you would typically use a service account key JSON.
     });
 }
 const db = admin.firestore();
@@ -35,10 +31,10 @@ http.createServer((req, res) => {
 // --- CONFIGURATION ---
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID; // Recommended: Set this in your .env for instant updates
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
 const CHECK_INTERVAL = 60000;
 
-// Local state (Syncs with Firestore)
 let config = {
     channelId: null,
     messageIds: {
@@ -173,16 +169,22 @@ async function syncMessage(channel, key, embed) {
     }
 }
 
-const commands = [
+// --- COMMAND DATA ---
+const commandsData = [
     new SlashCommandBuilder()
         .setName('setup')
         .setDescription('Set the channel for live event updates')
-        .addChannelOption(option => option.setName('channel').setDescription('The channel to post in').setRequired(true))
+        .addChannelOption(option => 
+            option.setName('channel')
+                .setDescription('The channel to post in')
+                .setRequired(true))
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .toJSON()
 ];
 
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
+    
     if (interaction.commandName === 'setup') {
         const targetChannel = interaction.options.getChannel('channel');
         config.channelId = targetChannel.id;
@@ -206,9 +208,27 @@ client.once('ready', async () => {
     
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log('Slash commands registered.');
-    } catch (e) { console.error(e); }
+        console.log('Started refreshing application (/) commands.');
+
+        // 1. Register GUILD commands (Instant appearance in your test server)
+        if (GUILD_ID) {
+            await rest.put(
+                Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+                { body: commandsData }
+            );
+            console.log(`Successfully reloaded guild commands for: ${GUILD_ID}`);
+        }
+
+        // 2. Register GLOBAL commands (Appears in all servers after ~1 hour)
+        await rest.put(
+            Routes.applicationCommands(CLIENT_ID),
+            { body: commandsData }
+        );
+        console.log('Successfully reloaded global application (/) commands.');
+
+    } catch (e) { 
+        console.error('Error registering commands:', e); 
+    }
 
     updateEvents();
     setInterval(updateEvents, CHECK_INTERVAL);
