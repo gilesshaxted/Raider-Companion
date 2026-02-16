@@ -2,7 +2,7 @@
   "name": "raider-companion",
   "version": "1.0.0",
   "description": "Discord bot to track ARC Raiders event rotations",
-  "main": "bot.js",
+  "main": "index.js",
   "scripts": {
     "start": "node bot.js"
   },
