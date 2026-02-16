@@ -32,19 +32,19 @@ let MESSAGE_IDS = {
 const mapConfigs = {
     'Dam': {
         color: 0x3498db,
-        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472980650201055495/map-review-dam-battlegrounds-v0-l547kr11ki1g1.png'
+        image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985276753121413/l547kr11ki1g1.png'
     },
     'Buried City': {
         color: 0xe67e22,
-        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472981360565161985/1200px-Buried_City.png.png'
+        image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985571034140704/Buried_City.png'
     },
     'Blue Gate': {
         color: 0x9b59b6,
-        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472981803399905361/1200px-Blue_Gate.png.png'
+        image: 'https://cdn.discordapp.com/attachments/1397641556009156658/1472984992203149449/1200px-Blue_Gate.png.png'
     },
     'Spaceport': {
         color: 0x2ecc71,
-        image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472981968932311152/71d06f7d82b8b3f8a96f4d8bfe388fa769ed3f5d.png'
+        image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985777280647319/Spaceport.png'
     },
     'Stella Montis': {
         color: 0xf1c40f,
@@ -90,7 +90,7 @@ async function updateEvents() {
         // --- 1. GENERATE MAP SPECIFIC EMBEDS ---
         for (const [mapName, config] of Object.entries(mapConfigs)) {
             
-            // Normalize map names for filtering
+            // Normalize map names for filtering (handles spaces like "Space Port" vs "Spaceport")
             const mapEvents = events.filter(e => 
                 e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, '')
             );
@@ -104,7 +104,7 @@ async function updateEvents() {
             const embed = new EmbedBuilder()
                 .setTitle(`📍 ${mapName}`)
                 .setColor(config.color)
-                .setImage(config.image) // Ensure main map image is always set
+                .setImage(config.image)
                 .setTimestamp()
                 .setFooter({ text: `Last update` });
 
@@ -112,14 +112,14 @@ async function updateEvents() {
             if (activeEvent) {
                 embed.addFields({ 
                     name: '📡 Status', 
-                    value: `🟢 **LIVE:** ${getEmoji(activeEvent.name)} ${activeEvent.name}\nEnds <t:${Math.floor(activeEvent.endTime / 1000)}:R>` 
+                    value: `🟢 **LIVE:** ${getEmoji(activeEvent.name)} **${activeEvent.name}**\nEnds <t:${Math.floor(activeEvent.endTime / 1000)}:R>` 
                 });
                 if (activeEvent.icon) embed.setThumbnail(activeEvent.icon);
             } else {
                 embed.addFields({ name: '📡 Status', value: '⚪ **Offline**' });
             }
 
-            // Next Up Section
+            // Next Up Section (3 events inline)
             if (upcomingEvents.length > 0) {
                 upcomingEvents.forEach((e, index) => {
                     embed.addFields({
@@ -132,7 +132,6 @@ async function updateEvents() {
                 embed.addFields({ name: 'Next Up', value: 'No upcoming rotations found.' });
             }
 
-            // Send or Update
             await syncMessage(channel, mapName, embed);
         }
 
@@ -161,9 +160,6 @@ async function updateEvents() {
     }
 }
 
-/**
- * Helper to either edit an existing message or send a new one
- */
 async function syncMessage(channel, key, embed) {
     if (MESSAGE_IDS[key]) {
         try {
@@ -172,7 +168,6 @@ async function syncMessage(channel, key, embed) {
         } catch (e) {
             const sent = await channel.send({ embeds: [embed] });
             MESSAGE_IDS[key] = sent.id;
-            console.log(`Updated ${key} Message ID: ${sent.id}`);
         }
     } else {
         const sent = await channel.send({ embeds: [embed] });
