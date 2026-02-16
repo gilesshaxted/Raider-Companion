@@ -83,7 +83,7 @@ const client = new Client({
         'Guilds',
         'GuildMessages',
         'MessageContent',
-        'GuildScheduledEvents' // Added for native event creation
+        'GuildScheduledEvents' 
     ]
 });
 
@@ -236,7 +236,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
             // 2. MULTI-EVENT ALERT LOGIC & SCHEDULED EVENTS
             const upcomingEvents = events.filter(e => e.startTime > now && e.startTime <= fifteenMinsFromNow);
             
-            // Fetch existing Discord scheduled events to avoid duplication
             let existingScheduledEvents = [];
             try {
                 existingScheduledEvents = await guild.scheduledEvents.fetch();
@@ -247,8 +246,8 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 
                 if (!config.alertedEventKeys) config.alertedEventKeys = [];
                 
+                // PART A: Channel Ping (Only if not alerted yet)
                 if (!config.alertedEventKeys.includes(alertKey)) {
-                    // Send Channel Ping
                     const roleMention = await getOrCreateEventRole(guild, e.name);
                     const alertSent = await channel.send({
                         content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!`
@@ -256,31 +255,33 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     
                     config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
                     config.alertedEventKeys.push(alertKey);
-
-                    // Create Native Discord Scheduled Event
-                    const alreadyScheduled = existingScheduledEvents.some(se => 
-                        se.name.includes(e.name) && 
-                        Math.abs(se.scheduledStartTimestamp - e.startTime) < 60000
-                    );
-
-                    if (!alreadyScheduled) {
-                        try {
-                            await guild.scheduledEvents.create({
-                                name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
-                                scheduledStartTime: new Date(e.startTime),
-                                scheduledEndTime: new Date(e.endTime),
-                                privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
-                                entityType: GuildScheduledEventEntityType.External,
-                                entityMetadata: { location: e.map },
-                                description: `In-game event rotation on ${e.map}. Be ready Raiders!`
-                            });
-                        } catch (err) {
-                            console.error(`Failed to create scheduled event for ${e.name}:`, err.message);
-                        }
-                    }
                     
                     if (config.alertedEventKeys.length > 50) {
                         config.alertedEventKeys = config.alertedEventKeys.slice(-50);
+                    }
+                }
+
+                // PART B: Scheduled Event Sync (Ensures native event exists)
+                // This runs every loop, allowing /update to force-create if missing
+                const alreadyScheduled = existingScheduledEvents.some(se => 
+                    se.name.includes(e.name) && 
+                    Math.abs(se.scheduledStartTimestamp - e.startTime) < 60000
+                );
+
+                if (!alreadyScheduled) {
+                    try {
+                        console.log(`Creating native scheduled event for ${e.name} on ${e.map}`);
+                        await guild.scheduledEvents.create({
+                            name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
+                            scheduledStartTime: new Date(e.startTime),
+                            scheduledEndTime: new Date(e.endTime),
+                            privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+                            entityType: GuildScheduledEventEntityType.External,
+                            entityMetadata: { location: e.map },
+                            description: `In-game event rotation on ${e.map}. Be ready Raiders!`
+                        });
+                    } catch (err) {
+                        console.error(`Failed to create scheduled event:`, err.message);
                     }
                 }
             }
