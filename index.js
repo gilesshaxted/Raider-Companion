@@ -13,36 +13,18 @@ const {
     GuildScheduledEventPrivacyLevel,
     GuildScheduledEventEntityType,
     ActivityType,
-    Partials 
+    Partials,
+    AttachmentBuilder 
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
 // --- FIREBASE WEB SDK SETUP ---
 const { initializeApp } = require('firebase/app');
 const { getFirestore, doc, getDoc, setDoc, collection, getDocs } = require('firebase/firestore');
 const { getAuth, signInAnonymously } = require('firebase/auth');
-
-// --- CONFIGURATION VALIDATION ---
-// This ensures the bot doesn't crash with "invalid-api-key" if env vars are missing
-const requiredEnvVars = [
-    'FIREBASE_API_KEY',
-    'FIREBASE_AUTH_DOMAIN',
-    'FIREBASE_PROJECT_ID',
-    'FIREBASE_STORAGE_BUCKET',
-    'FIREBASE_MESSAGING_SENDER_ID',
-    'FIREBASE_APP_ID',
-    'DISCORD_TOKEN',
-    'CLIENT_ID'
-];
-
-const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
-if (missingVars.length > 0) {
-    console.error('❌ CRITICAL ERROR: Missing required Environment Variables:');
-    missingVars.forEach(v => console.error(`   - ${v}`));
-    console.error('\nPlease ensure these are set in your .env file or Koyeb Secrets dashboard.');
-    process.exit(1); // Stop the bot before it crashes with a cryptic Firebase error
-}
 
 const firebaseConfig = {
     apiKey: process.env.FIREBASE_API_KEY,
@@ -58,6 +40,25 @@ const db = getFirestore(app);
 const auth = getAuth(app);
 const appId = 'raider-companion';
 
+// --- CONFIGURATION VALIDATION ---
+const requiredEnvVars = [
+    'FIREBASE_API_KEY',
+    'FIREBASE_AUTH_DOMAIN',
+    'FIREBASE_PROJECT_ID',
+    'FIREBASE_STORAGE_BUCKET',
+    'FIREBASE_MESSAGING_SENDER_ID',
+    'FIREBASE_APP_ID',
+    'DISCORD_TOKEN',
+    'CLIENT_ID'
+];
+
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+    console.error('❌ CRITICAL ERROR: Missing required Environment Variables:');
+    missingVars.forEach(v => console.error(`   - ${v}`));
+    process.exit(1); 
+}
+
 // --- KOYEB HEALTH CHECK SERVER ---
 const PORT = process.env.PORT || 8000;
 http.createServer((req, res) => {
@@ -65,7 +66,7 @@ http.createServer((req, res) => {
     res.end('Bot is running\n');
 }).listen(PORT, () => console.log(`Health check server listening on port ${PORT}`));
 
-// --- CONFIGURATION ---
+// --- BOT SETTINGS ---
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
@@ -77,20 +78,20 @@ const CHECK_INTERVAL = 60000;
 
 let guildConfigs = new Map();
 
+/**
+ * MAP CONFIGURATION
+ * Updated with your specific asset filenames.
+ */
 const mapConfigs = {
-    'Dam': { color: 0x3498db, image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985276753121413/l547kr11ki1g1.png' },
-    'Buried City': { color: 0xe67e22, image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985571034140704/Buried_City.png' },
-    'Blue Gate': { color: 0x9b59b6, image: 'https://cdn.discordapp.com/attachments/1397641556009156658/1472984992203149449/1200px-Blue_Gate.png.png' },
-    'Spaceport': { color: 0x2ecc71, image: 'https://media.discordapp.net/attachments/1397641556009156658/1472985777280647319/Spaceport.png' },
-    'Stella Montis': { color: 0xf1c40f, image: 'https://cdn.discordapp.com/attachments/1077242377099550863/1472982493719298281/ARC-Raiders-Stella-Montis-map-guide.png' }
+    'Dam': { color: 0x3498db, fileName: 'dam_battlegrounds.png' },
+    'Buried City': { color: 0xe67e22, fileName: 'buried_city.png' },
+    'Blue Gate': { color: 0x9b59b6, fileName: 'blue_gate.png' },
+    'Spaceport': { color: 0x2ecc71, fileName: 'spaceport.png' },
+    'Stella Montis': { color: 0xf1c40f, fileName: 'stella_montis.png' }
 };
 
 const rarityColors = {
-    'Common': 0x95a5a6,
-    'Uncommon': 0x2ecc71,
-    'Rare': 0x3498db,
-    'Epic': 0x9b59b6,
-    'Legendary': 0xf1c40f
+    'Common': 0x95a5a6, 'Uncommon': 0x2ecc71, 'Rare': 0x3498db, 'Epic': 0x9b59b6, 'Legendary': 0xf1c40f
 };
 
 const eventEmojis = {
@@ -109,21 +110,11 @@ const client = new Client({
         GatewayIntentBits.GuildScheduledEvents,
         GatewayIntentBits.GuildMessageReactions 
     ],
-    partials: [
-        Partials.Message, 
-        Partials.Reaction, 
-        Partials.User
-    ]
+    partials: [Partials.Message, Partials.Reaction, Partials.User]
 });
 
-let arcCache = [];
-let itemCache = [];
-let traderCache = {}; 
-let traderItemsFlat = []; 
-let traderCategories = []; 
-let questCache = []; 
-let isAuthorized = false;
-let isUpdating = false; 
+let arcCache = [], itemCache = [], traderCache = {}, traderItemsFlat = [], traderCategories = [], questCache = [];
+let isAuthorized = false, isUpdating = false;
 
 // --- PERSISTENCE HELPERS ---
 async function ensureAuth() {
@@ -172,12 +163,8 @@ async function loadAllConfigs() {
 async function refreshCaches() {
     try {
         const [arcRes, itemRes, traderRes, questRes] = await Promise.all([
-            axios.get(ARCS_API_URL),
-            axios.get(ITEMS_API_URL),
-            axios.get(TRADERS_API_URL),
-            axios.get(QUESTS_API_URL)
+            axios.get(ARCS_API_URL), axios.get(ITEMS_API_URL), axios.get(TRADERS_API_URL), axios.get(QUESTS_API_URL)
         ]);
-
         arcCache = arcRes.data?.data || [];
         itemCache = itemRes.data?.data || [];
         traderCache = traderRes.data?.data || {};
@@ -192,8 +179,6 @@ async function refreshCaches() {
             });
         }
         traderCategories = Array.from(cats);
-        
-        console.log(`Caches Refreshed: ${arcCache.length} ARCs, ${itemCache.length} Items, ${questCache.length} Quests.`);
     } catch (e) { console.error("Error refreshing caches:", e.message); }
 }
 
@@ -210,19 +195,25 @@ async function getOrCreateEventRole(guild, eventName) {
             });
         }
         return role;
-    } catch (e) {
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
-async function fetchImageAsDataURI(url) {
-    if (!url) return null;
+/**
+ * Loads a local image and converts it to a base64 Data URI for Discord native events
+ */
+function getLocalImageAsDataURI(fileName) {
+    if (!fileName) return null;
+    const filePath = path.join(__dirname, 'assets', fileName);
+    if (!fs.existsSync(filePath)) {
+        console.warn(`⚠️ Asset missing for scheduled event: ${filePath}`);
+        return null;
+    }
     try {
-        const response = await axios.get(url, { responseType: 'arraybuffer' });
-        const buffer = Buffer.from(response.data, 'binary');
+        const buffer = fs.readFileSync(filePath);
         const base64 = buffer.toString('base64');
         return `data:image/png;base64,${base64}`;
     } catch (err) {
+        console.error(`❌ Failed to read asset: ${fileName}`, err.message);
         return null;
     }
 }
@@ -235,10 +226,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
     try {
         const response = await axios.get(API_URL);
         const events = response.data?.data;
-        if (!events || !Array.isArray(events)) {
-            isUpdating = false;
-            return;
-        }
+        if (!events || !Array.isArray(events)) { isUpdating = false; return; }
 
         const now = Date.now();
         const alertWindow = now + (60 * 60 * 1000); 
@@ -250,47 +238,36 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
 
         for (const [guildId, config] of guildsToUpdate) {
             if (!config || !config.channelId) continue;
-
             let channel;
-            try {
-                channel = await client.channels.fetch(config.channelId);
-            } catch (err) { continue; }
+            try { channel = await client.channels.fetch(config.channelId); } catch (err) { continue; }
             if (!channel) continue;
 
             const guild = channel.guild;
 
+            // 1. Cleanup expired alerts
             if (config.activeAlerts && config.activeAlerts.length > 0) {
                 const freshAlerts = [];
                 for (const alert of config.activeAlerts) {
                     if (now >= alert.startTime) {
-                        try {
-                            const msg = await channel.messages.fetch(alert.messageId);
-                            await msg.delete();
-                        } catch (err) {}
-                    } else {
-                        freshAlerts.push(alert);
-                    }
+                        try { const msg = await channel.messages.fetch(alert.messageId); await msg.delete(); } catch (err) {}
+                    } else { freshAlerts.push(alert); }
                 }
                 config.activeAlerts = freshAlerts;
             }
 
+            // 2. Scheduled Events Cleanup & Creation
             let existingScheduledEvents = [];
-            try {
-                existingScheduledEvents = await guild.scheduledEvents.fetch();
-            } catch (e) {}
+            try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
 
-            const seenKeys = new Set();
+            const seenSlots = new Set();
             for (const se of existingScheduledEvents.values()) {
-                const key = `${se.scheduledStartTimestamp}_${se.entityMetadata?.location}_${se.name.toLowerCase()}`;
-                if (seenKeys.has(key)) {
+                const key = `${se.scheduledStartTimestamp}_${se.entityMetadata?.location}`;
+                if (seenSlots.has(key)) {
                     try { await se.delete(); } catch (e) {}
-                } else {
-                    seenKeys.add(key);
-                }
+                } else { seenSlots.add(key); }
             }
 
             const scorableEvents = events.filter(e => e.startTime > now && e.startTime <= scheduleWindow);
-            
             for (const e of scorableEvents) {
                 const alreadyScheduled = existingScheduledEvents.some(se => {
                     const sameLocation = se.entityMetadata?.location === e.map;
@@ -300,11 +277,8 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
 
                 if (!alreadyScheduled) {
                     try {
-                        const mapKey = Object.keys(mapConfigs).find(k => 
-                            k.toLowerCase().replace(/\s/g, '') === e.map?.toLowerCase().replace(/\s/g, '')
-                        );
-                        const mapImage = mapKey ? mapConfigs[mapKey].image : null;
-                        const dataURI = await fetchImageAsDataURI(mapImage);
+                        const mapKey = Object.keys(mapConfigs).find(k => k.toLowerCase().replace(/\s/g, '') === e.map?.toLowerCase().replace(/\s/g, ''));
+                        const dataURI = mapKey ? getLocalImageAsDataURI(mapConfigs[mapKey].fileName) : null;
 
                         await guild.scheduledEvents.create({
                             name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
@@ -316,37 +290,32 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                             image: dataURI, 
                             description: `Upcoming in-game event rotation on ${e.map}. Be ready Raiders!`
                         });
-                    } catch (err) {}
+                        console.log(`✅ Event Created: ${e.name} (${e.map})`);
+                    } catch (err) { console.error(`❌ Event Creation Error:`, err.message); }
                 }
 
+                // Channel Pings
                 if (e.startTime <= alertWindow) {
                     const alertKey = `${e.name}_${e.map}_${e.startTime}`;
                     if (!config.alertedEventKeys) config.alertedEventKeys = [];
-                    
                     if (!config.alertedEventKeys.includes(alertKey)) {
                         const role = await getOrCreateEventRole(guild, e.name);
                         const roleMention = role ? `<@&${role.id}>` : `**${e.name}**`;
                         const alertSent = await channel.send({
                             content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!`
                         });
-                        
                         config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
                         config.alertedEventKeys.push(alertKey);
-                        
-                        if (config.alertedEventKeys.length > 100) {
-                            config.alertedEventKeys = config.alertedEventKeys.slice(-100);
-                        }
+                        if (config.alertedEventKeys.length > 100) config.alertedEventKeys = config.alertedEventKeys.slice(-100);
                     }
                 }
             }
 
+            // 4. Map Embeds (using local attachments)
             if (forceNewMessages) {
                 for (const key in config.messageIds) {
                     if (config.messageIds[key]) {
-                        try {
-                            const m = await channel.messages.fetch(config.messageIds[key]);
-                            await m.delete();
-                        } catch (e) {}
+                        try { const m = await channel.messages.fetch(config.messageIds[key]); await m.delete(); } catch (e) {}
                         config.messageIds[key] = null;
                     }
                 }
@@ -357,237 +326,147 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 const activeEvent = mapEvents.find(e => e.startTime <= now && e.endTime > now);
                 const upcoming = mapEvents.filter(e => e.startTime > now).sort((a, b) => a.startTime - b.startTime).slice(0, 3);
 
+                const imagePath = path.join(__dirname, 'assets', mapSet.fileName);
+                const file = fs.existsSync(imagePath) ? new AttachmentBuilder(imagePath) : null;
+
                 const embed = new EmbedBuilder()
-                    .setTitle(`📍 ${mapName}`)
-                    .setColor(mapSet.color)
-                    .setImage(mapSet.image)
-                    .setTimestamp()
-                    .setFooter({ text: `metaforge.app/arc-raiders` });
+                    .setTitle(`📍 ${mapName}`).setColor(mapSet.color)
+                    .setTimestamp().setFooter({ text: `metaforge.app/arc-raiders` });
+
+                if (file) {
+                    embed.setImage(`attachment://${mapSet.fileName}`);
+                }
 
                 if (activeEvent) {
                     embed.addFields({ name: '📡 Status', value: `🟢 **LIVE:** ${getEmoji(activeEvent.name)} **${activeEvent.name}**\nEnds <t:${Math.floor(activeEvent.endTime / 1000)}:R>` });
                     if (activeEvent.icon) embed.setThumbnail(activeEvent.icon);
-                } else {
-                    embed.addFields({ name: '📡 Status', value: '⚪ **Offline**' });
-                }
+                } else { embed.addFields({ name: '📡 Status', value: '⚪ **Offline**' }); }
 
                 upcoming.forEach((e, i) => {
                     embed.addFields({ name: `Next Up #${i + 1}`, value: `${getEmoji(e.name)} **${e.name}**\n<t:${Math.floor(e.startTime / 1000)}:R>`, inline: true });
                 });
-
-                await syncMessage(channel, config, mapName, embed);
+                
+                await syncMessageWithFile(channel, config, mapName, embed, file);
             }
 
+            // Summary Embed
             const current = events.filter(e => e.startTime <= now && e.endTime > now);
             const summary = new EmbedBuilder()
-                .setTitle('🛸 ARC Raiders - Live Summary')
-                .setColor(0x00AE86)
-                .setDescription('React to this message with an emoji below to get the notification role for that specific event rotation!')
-                .setFooter({ text: `Data provided by metaforge.app/arc-raiders` })
-                .setTimestamp();
+                .setTitle('🛸 ARC Raiders - Live Summary').setColor(0x00AE86)
+                .setDescription('React to this message with an emoji below to get the notification role!')
+                .setFooter({ text: `Data provided by metaforge.app/arc-raiders` }).setTimestamp();
 
             if (current.length > 0) {
                 summary.addFields({ name: '✅ Currently Active', value: current.map(e => `${getEmoji(e.name)} **${e.name}**\n└ *${e.map}*\n────────────────`).join('\n') });
-            } else {
-                summary.addFields({ name: '✅ Currently Active', value: 'No events currently active.' });
-            }
+            } else { summary.addFields({ name: '✅ Currently Active', value: 'No events currently active.' }); }
 
             const summarySent = await syncMessage(channel, config, 'Summary', summary);
-            
             if (summarySent && forceNewMessages) {
-                for (const emoji of Object.values(eventEmojis)) {
-                    try { await summarySent.react(emoji); } catch (e) {}
-                }
+                for (const emoji of Object.values(eventEmojis)) { try { await summarySent.react(emoji); } catch (e) {} }
             }
-
             await saveGuildConfig(guildId);
         }
-
-    } catch (error) { 
-        console.error('Update loop error:', error.message); 
-    } finally {
-        if (!targetGuildId) isUpdating = false;
-    }
+    } catch (error) { console.error('Update loop error:', error.message); } finally { if (!targetGuildId) isUpdating = false; }
 }
 
 async function syncMessage(channel, config, key, embed) {
     if (config.messageIds[key]) {
+        try { const msg = await channel.messages.fetch(config.messageIds[key]); return await msg.edit({ embeds: [embed] }); } 
+        catch (e) { const sent = await channel.send({ embeds: [embed] }); config.messageIds[key] = sent.id; return sent; }
+    } else { const sent = await channel.send({ embeds: [embed] }); config.messageIds[key] = sent.id; return sent; }
+}
+
+/**
+ * Specialized sync function to handle local file attachments for map images
+ */
+async function syncMessageWithFile(channel, config, key, embed, file) {
+    const files = file ? [file] : [];
+    if (config.messageIds[key]) {
         try {
             const msg = await channel.messages.fetch(config.messageIds[key]);
-            return await msg.edit({ embeds: [embed] });
+            return await msg.edit({ embeds: [embed], files });
         } catch (e) {
-            const sent = await channel.send({ embeds: [embed] });
+            const sent = await channel.send({ embeds: [embed], files });
             config.messageIds[key] = sent.id;
             return sent;
         }
     } else {
-        const sent = await channel.send({ embeds: [embed] });
+        const sent = await channel.send({ embeds: [embed], files });
         config.messageIds[key] = sent.id;
         return sent;
     }
 }
 
 function buildTraderItemEmbed(item) {
-    return new EmbedBuilder()
-        .setTitle(`📦 Trader Item: ${item.name}`)
-        .setDescription(item.description || "No description provided.")
-        .setColor(rarityColors[item.rarity] || 0x5865F2)
-        .setThumbnail(item.icon)
-        .addFields(
-            { name: 'Seller', value: `👤 ${item.traderName}`, inline: true },
-            { name: 'Trader Price', value: `🪙 ${item.trader_price.toLocaleString()}`, inline: true },
-            { name: 'Base Value', value: `🪙 ${item.value.toLocaleString()}`, inline: true },
-            { name: 'Rarity', value: item.rarity, inline: true },
-            { name: 'Category', value: item.item_type, inline: true }
-        )
-        .setTimestamp();
+    return new EmbedBuilder().setTitle(`📦 Trader Item: ${item.name}`).setDescription(item.description || "No description provided.").setColor(rarityColors[item.rarity] || 0x5865F2).setThumbnail(item.icon).addFields({ name: 'Seller', value: `👤 ${item.traderName}`, inline: true }, { name: 'Trader Price', value: `🪙 ${item.trader_price.toLocaleString()}`, inline: true }, { name: 'Base Value', value: `🪙 ${item.value.toLocaleString()}`, inline: true }, { name: 'Rarity', value: item.rarity, inline: true }, { name: 'Category', value: item.item_type, inline: true }).setTimestamp();
 }
 
 const commandsData = [
-    new SlashCommandBuilder()
-        .setName('setup')
-        .setDescription('Set the channel for live event updates')
-        .addChannelOption(option => option.setName('channel').setDescription('The channel to post in').setRequired(true))
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-        .toJSON(),
-    new SlashCommandBuilder()
-        .setName('update')
-        .setDescription('Force a manual update of the live event embeds in this guild')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-        .toJSON(),
-    new SlashCommandBuilder()
-        .setName('arc')
-        .setDescription('Get intelligence on a specific ARC unit')
-        .addStringOption(option => option.setName('unit').setDescription('Pick an ARC unit').setRequired(true).setAutocomplete(true))
-        .toJSON(),
-    new SlashCommandBuilder()
-        .setName('item')
-        .setDescription('Lookup an item, weapon, or material')
-        .addStringOption(option => option.setName('name').setDescription('Search for an item').setRequired(true).setAutocomplete(true))
-        .toJSON(),
-    new SlashCommandBuilder()
-        .setName('traders')
-        .setDescription('View trader inventories or find where an item is sold')
-        .addStringOption(option => 
-            option.setName('name')
-                .setDescription('Search for a Trader or Category (e.g. Weapon)')
-                .setRequired(true)
-                .setAutocomplete(true))
-        .toJSON(),
-    new SlashCommandBuilder()
-        .setName('quests')
-        .setDescription('View detailed objectives and rewards for ARC Raiders quests')
-        .addStringOption(option => 
-            option.setName('name')
-                .setDescription('Search for a quest name')
-                .setRequired(true)
-                .setAutocomplete(true))
-        .toJSON()
+    new SlashCommandBuilder().setName('setup').setDescription('Set the channel for live event updates').addChannelOption(option => option.setName('channel').setDescription('The channel to post in').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
+    new SlashCommandBuilder().setName('update').setDescription('Force a manual update of the live event embeds in this guild').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
+    new SlashCommandBuilder().setName('arc').setDescription('Get intelligence on a specific ARC unit').addStringOption(option => option.setName('unit').setDescription('Pick an ARC unit').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('item').setDescription('Lookup an item, weapon, or material').addStringOption(option => option.setName('name').setDescription('Search for an item').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('traders').setDescription('View trader inventories or find where an item is sold').addStringOption(option => option.setName('name').setDescription('Search for a Trader or Category (e.g. Weapon)').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('quests').setDescription('View detailed objectives and rewards for ARC Raiders quests').addStringOption(option => option.setName('name').setDescription('Search for a quest name').setRequired(true).setAutocomplete(true)).toJSON()
 ];
 
-// --- REACTION HANDLER HELPERS ---
 async function handleReaction(reaction, user, add = true) {
     if (user.bot) return;
-    if (reaction.partial) {
-        try { await reaction.fetch(); } catch (e) { return; }
-    }
-
+    if (reaction.partial) { try { await reaction.fetch(); } catch (e) { return; } }
     const guildId = reaction.message.guildId;
     const config = guildConfigs.get(guildId);
     if (!config || reaction.message.id !== config.messageIds.Summary) return;
-
     const eventName = Object.keys(eventEmojis).find(key => eventEmojis[key] === reaction.emoji.name);
     if (!eventName) return;
-
     const guild = reaction.message.guild;
     const member = await guild.members.fetch(user.id);
     const role = await getOrCreateEventRole(guild, eventName);
-
-    if (role) {
-        if (add) {
-            await member.roles.add(role);
-        } else {
-            await member.roles.remove(role);
-        }
-    }
+    if (role) { if (add) { await member.roles.add(role); } else { await member.roles.remove(role); } }
 }
 
 client.on('interactionCreate', async interaction => {
     if (interaction.isAutocomplete()) {
         const focusedValue = interaction.options.getFocused().toLowerCase();
-        if (interaction.commandName === 'arc') {
-            const choices = arcCache.filter(arc => arc.name.toLowerCase().includes(focusedValue));
-            await interaction.respond(choices.slice(0, 25).map(arc => ({ name: arc.name, value: arc.id })));
-        }
-        if (interaction.commandName === 'item') {
-            const choices = itemCache.filter(item => item.name.toLowerCase().includes(focusedValue));
-            await interaction.respond(choices.slice(0, 25).map(item => ({ name: item.name, value: item.id })));
-        }
+        if (interaction.commandName === 'arc') { const choices = arcCache.filter(arc => arc.name.toLowerCase().includes(focusedValue)); await interaction.respond(choices.slice(0, 25).map(arc => ({ name: arc.name, value: arc.id }))); }
+        if (interaction.commandName === 'item') { const choices = itemCache.filter(item => item.name.toLowerCase().includes(focusedValue)); await interaction.respond(choices.slice(0, 25).map(item => ({ name: item.name, value: item.id }))); }
         if (interaction.commandName === 'traders') {
             const results = [];
-            Object.keys(traderCache).forEach(name => {
-                if (name.toLowerCase().includes(focusedValue)) {
-                    results.push({ name: `👤 Trader: ${name}`, value: `trader:${name}` });
-                }
-            });
-            traderCategories.forEach(cat => {
-                if (cat.toLowerCase().includes(focusedValue)) {
-                    results.push({ name: `📁 Category: ${cat}`, value: `category:${cat}` });
-                }
-            });
+            Object.keys(traderCache).forEach(name => { if (name.toLowerCase().includes(focusedValue)) results.push({ name: `👤 Trader: ${name}`, value: `trader:${name}` }); });
+            traderCategories.forEach(cat => { if (cat.toLowerCase().includes(focusedValue)) results.push({ name: `📁 Category: ${cat}`, value: `category:${cat}` }); });
             await interaction.respond(results.slice(0, 25));
         }
-        if (interaction.commandName === 'quests') {
-            const choices = questCache.filter(q => q.name.toLowerCase().includes(focusedValue));
-            await interaction.respond(choices.slice(0, 25).map(q => ({ name: q.name, value: q.id })));
-        }
+        if (interaction.commandName === 'quests') { const choices = questCache.filter(q => q.name.toLowerCase().includes(focusedValue)); await interaction.respond(choices.slice(0, 25).map(q => ({ name: q.name, value: q.id }))); }
         return;
     }
-
     if (interaction.isStringSelectMenu()) {
         if (interaction.customId === 'trader_item_select') {
             const itemId = interaction.values[0];
             const item = traderItemsFlat.find(i => i.id === itemId);
-            if (item) {
-                await interaction.reply({ embeds: [buildTraderItemEmbed(item)], ephemeral: true });
-            }
+            if (item) { await interaction.reply({ embeds: [buildTraderItemEmbed(item)], ephemeral: true }); }
         }
         return;
     }
-
     if (!interaction.isChatInputCommand()) return;
-    
     if (interaction.commandName === 'setup') {
         const targetChannel = interaction.options.getChannel('channel');
         const guildId = interaction.guildId;
-        const newConfig = {
-            channelId: targetChannel.id,
-            activeAlerts: [],
-            alertedEventKeys: [], 
-            lastAlertedEventTime: null,
-            messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null }
-        };
+        const newConfig = { channelId: targetChannel.id, activeAlerts: [], alertedEventKeys: [], lastAlertedEventTime: null, messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null } };
         guildConfigs.set(guildId, newConfig);
-        await interaction.reply({ content: `✅ Events will now be posted and kept current in ${targetChannel} for this server.`, ephemeral: true });
+        await interaction.reply({ content: `✅ Events configured for ${targetChannel}.`, ephemeral: true });
         await updateEvents(guildId, true);
     }
-
     if (interaction.commandName === 'update') {
         const guildId = interaction.guildId;
-        if (!guildConfigs.has(guildId)) return interaction.reply({ content: "❌ Please run `/setup` first!", ephemeral: true });
-        await interaction.reply({ content: '🔄 Forcing update of all event embeds in this server...', ephemeral: true });
+        if (!guildConfigs.has(guildId)) return interaction.reply({ content: "❌ Run `/setup` first!", ephemeral: true });
+        await interaction.reply({ content: '🔄 Forcing update...', ephemeral: true });
         await updateEvents(guildId, true);
     }
-
     if (interaction.commandName === 'arc') {
         const arc = arcCache.find(a => a.id === interaction.options.getString('unit'));
         if (!arc) return interaction.reply({ content: "❌ Intelligence not found.", ephemeral: true });
-        const embed = new EmbedBuilder()
-            .setTitle(`🤖 Intelligence: ${arc.name}`).setDescription(arc.description).setColor(0x5865F2)
-            .setThumbnail(arc.icon).setImage(arc.image).setTimestamp();
+        const embed = new EmbedBuilder().setTitle(`🤖 Intelligence: ${arc.name}`).setDescription(arc.description).setColor(0x5865F2).setThumbnail(arc.icon).setImage(arc.image).setTimestamp();
         await interaction.reply({ embeds: [embed] });
     }
-
     if (interaction.commandName === 'item') {
         const item = itemCache.find(i => i.id === interaction.options.getString('name'));
         if (!item) return interaction.reply({ content: "❌ Item not found.", ephemeral: true });
@@ -600,66 +479,51 @@ client.on('interactionCreate', async interaction => {
         }
         await interaction.reply({ embeds: [embed] });
     }
-
     if (interaction.commandName === 'traders') {
         const selection = interaction.options.getString('name');
         if (selection.startsWith('category:')) {
             const catName = selection.split(':')[1];
             const items = traderItemsFlat.filter(i => i.item_type === catName);
-            if (items.length === 0) return interaction.reply({ content: "❌ No trader items found in this category.", ephemeral: true });
-            const list = items.map(i => `• **${i.name}** sold by **${i.traderName}** (🪙 ${i.trader_price.toLocaleString()})`).join('\n');
-            const embed = new EmbedBuilder().setTitle(`📁 Browsing Category: ${catName}`).setDescription(list).setColor(0x3498db);
-            const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select an item to see details...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, description: `Seller: ${i.traderName} | Price: ${i.trader_price}`, value: i.id })));
+            if (items.length === 0) return interaction.reply({ content: "❌ No trader items found.", ephemeral: true });
+            const list = items.map(i => `• **${i.name}** sold by **${i.traderName}**`).join('\n');
+            const embed = new EmbedBuilder().setTitle(`📁 Category: ${catName}`).setDescription(list).setColor(0x3498db);
+            const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select item...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
             const row = new ActionRowBuilder().addComponents(select);
             await interaction.reply({ embeds: [embed], components: [row] });
-        }
-        else if (selection.startsWith('trader:')) {
+        } else if (selection.startsWith('trader:')) {
             const traderName = selection.split(':')[1];
             const items = traderCache[traderName];
             if (!items) return interaction.reply({ content: "❌ Trader not found.", ephemeral: true });
-            const inventoryList = items.map(i => `• **${i.name}**\n└ 🪙 ${i.trader_price.toLocaleString()} (${i.rarity})`).join('\n');
-            const embed = new EmbedBuilder().setTitle(`👤 Trader Inventory: ${traderName}`).setDescription(inventoryList || 'This trader is currently out of stock.').setColor(0x00AE86);
-            const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder(`Select one of ${traderName}'s items...`).addOptions(items.slice(0, 25).map(i => ({ label: i.name, description: `Type: ${i.item_type} | Price: ${i.trader_price}`, value: i.id })));
+            const inventoryList = items.map(i => `• **${i.name}**\n└ 🪙 ${i.trader_price.toLocaleString()}`).join('\n');
+            const embed = new EmbedBuilder().setTitle(`👤 Trader: ${traderName}`).setDescription(inventoryList || 'Out of stock.').setColor(0x00AE86);
+            const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder(`Select item...`).addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
             const row = new ActionRowBuilder().addComponents(select);
             await interaction.reply({ embeds: [embed], components: [row] });
         } 
     }
-
     if (interaction.commandName === 'quests') {
         const questId = interaction.options.getString('name');
         try {
             await interaction.deferReply();
             const res = await axios.get(`${QUESTS_API_URL}?id=${questId}&page=1`);
             const quest = res.data?.data;
-            if (!quest) return interaction.editReply("❌ Quest data could not be retrieved.");
+            if (!quest) return interaction.editReply("❌ Quest data missing.");
             const embed = new EmbedBuilder().setTitle(`📜 Quest: ${quest.name}`).setColor(0x3498db).setThumbnail(quest.image).setTimestamp();
             if (quest.trader_name) embed.addFields({ name: '👤 Giver', value: quest.trader_name, inline: true });
-            if (quest.xp > 0) embed.addFields({ name: '✨ XP Reward', value: `\`${quest.xp.toLocaleString()}\``, inline: true });
-            if (quest.objectives && quest.objectives.length > 0) {
-                const objectiveList = quest.objectives.map(o => `• ${o}`).join('\n');
-                embed.addFields({ name: '🎯 Objectives', value: objectiveList });
-            }
+            if (quest.xp > 0) embed.addFields({ name: '✨ XP', value: `\`${quest.xp.toLocaleString()}\``, inline: true });
+            if (quest.objectives?.length > 0) embed.addFields({ name: '🎯 Objectives', value: quest.objectives.map(o => `• ${o}`).join('\n') });
             let rewardsText = "";
-            if (quest.granted_items && quest.granted_items.length > 0) {
-                rewardsText += quest.granted_items.map(r => `✅ **${r.quantity}x** ${r.item.name}`).join('\n') + '\n';
-            }
-            if (quest.rewards && quest.rewards.length > 0) {
-                rewardsText += quest.rewards.map(r => `🎁 **${r.quantity}x** ${r.item.name}`).join('\n');
-            }
+            if (quest.granted_items?.length > 0) rewardsText += quest.granted_items.map(r => `✅ **${r.quantity}x** ${r.item.name}`).join('\n') + '\n';
+            if (quest.rewards?.length > 0) rewardsText += quest.rewards.map(r => `🎁 **${r.quantity}x** ${r.item.name}`).join('\n');
             if (rewardsText) embed.addFields({ name: '💰 Rewards', value: rewardsText });
-            if (quest.guide_links && quest.guide_links.length > 0) {
-                const links = quest.guide_links.map(l => `[${l.label}](${l.url})`).join('\n');
-                embed.addFields({ name: '📖 Guides', value: links });
-            }
+            if (quest.guide_links?.length > 0) embed.addFields({ name: '📖 Guides', value: quest.guide_links.map(l => `[${l.label}](${l.url})`).join('\n') });
             await interaction.editReply({ embeds: [embed] });
-        } catch (e) {
-            await interaction.editReply("❌ An error occurred while fetching quest details.");
-        }
+        } catch (e) { await interaction.editReply("❌ Error fetching quest."); }
     }
 });
 
-client.on('messageReactionAdd', async (reaction, user) => handleReaction(reaction, user, true));
-client.on('messageReactionRemove', async (reaction, user) => handleReaction(reaction, user, false));
+client.on('messageReactionAdd', (reaction, user) => handleReaction(reaction, user, true));
+client.on('messageReactionRemove', (reaction, user) => handleReaction(reaction, user, false));
 
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
@@ -672,19 +536,14 @@ client.once(Events.ClientReady, async () => {
     client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
     await loadAllConfigs();
     await refreshCaches();
-    
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
         const guilds = client.guilds.cache;
-        for (const [guildId, guild] of guilds) {
-            try {
-                await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commandsData });
-            } catch (err) {}
-        }
+        for (const [guildId, guild] of guilds) { try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commandsData }); } catch (err) {} }
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
     } catch (e) {}
-
     updateEvents();
     setInterval(updateEvents, CHECK_INTERVAL);
 });
+
 client.login(TOKEN);
