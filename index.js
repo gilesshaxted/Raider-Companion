@@ -20,7 +20,7 @@ const {
     ModalBuilder,
     TextInputBuilder,
     TextInputStyle,
-    MessageFlags // Added to resolve ephemeral deprecation
+    MessageFlags 
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
@@ -131,11 +131,13 @@ let isAuthorized = false, isGlobalUpdating = false;
 async function ensureAuth() {
     if (isAuthorized) return true;
     try {
+        console.log('Firebase: Attempting anonymous authentication...');
         await signInAnonymously(auth);
         isAuthorized = true;
+        console.log('Firebase: Authenticated successfully.');
         return true;
     } catch (e) {
-        console.error("Firebase Auth Failed:", e.message);
+        console.error("❌ Firebase Auth Failed:", e.message);
         return false;
     }
 }
@@ -157,6 +159,7 @@ async function saveGuildConfig(guildId) {
 async function loadAllConfigs() {
     if (!await ensureAuth()) return;
     try {
+        console.log('Firebase: Loading guild configurations...');
         const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'bot_configs');
         const querySnapshot = await getDocs(colRef);
         querySnapshot.forEach((doc) => {
@@ -167,7 +170,8 @@ async function loadAllConfigs() {
                 guildConfigs.set(guildId, data);
             }
         });
-    } catch (e) { console.error("Error loading configs:", e.message); }
+        console.log(`Firebase: Loaded configs for ${guildConfigs.size} guilds.`);
+    } catch (e) { console.error("❌ Error loading configs:", e.message); }
 }
 
 // --- BLACKLIST HELPERS ---
@@ -193,6 +197,7 @@ async function unblacklistGuild(guildId) {
 // --- DATA CACHING ---
 async function refreshCaches() {
     try {
+        console.log('API: Refreshing data caches...');
         const [arcRes, itemRes, traderRes, questRes] = await Promise.all([
             axios.get(ARCS_API_URL), axios.get(ITEMS_API_URL), axios.get(TRADERS_API_URL), axios.get(QUESTS_API_URL)
         ]);
@@ -210,7 +215,8 @@ async function refreshCaches() {
             });
         }
         traderCategories = Array.from(cats);
-    } catch (e) { console.error("Error refreshing caches:", e.message); }
+        console.log('API: Caches refreshed successfully.');
+    } catch (e) { console.error("❌ Error refreshing caches:", e.message); }
 }
 
 async function getOrCreateEventRole(guild, eventName) {
@@ -608,7 +614,6 @@ client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
     if (!message.guild) {
-        // Developer logic
         if (message.author.id === OWNER_ID) {
             console.log(`Developer DM received: ${message.content}`);
             if (message.content.toLowerCase() === 'ping') {
@@ -659,21 +664,36 @@ client.on('guildCreate', async guild => {
 
 client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
+    
+    // Set status immediately
     client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
+
+    // Sequentially load dependencies with logging
+    await ensureAuth();
     await loadAllConfigs();
     await refreshCaches();
     
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
+        console.log('Rest: Synchronizing slash commands...');
         const guilds = client.guilds.cache;
         for (const [guildId, guild] of guilds) {
             try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commandsData }); } catch (err) {}
         }
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
-    } catch (e) {}
+        console.log('Rest: Slash commands synchronized.');
+    } catch (e) { console.error('❌ Rest: Command synchronization failed:', e.message); }
 
     updateEvents();
     setInterval(updateEvents, CHECK_INTERVAL);
+    console.log('Bot is fully operational.');
 });
 
-client.login(TOKEN);
+// Added catch for login failures
+client.login(TOKEN).catch(err => {
+    console.error('❌ DISCORD LOGIN FAILED:');
+    console.error(err.message);
+    if (err.message.includes('intent')) {
+        console.error('\nTIP: You likely need to enable "Privileged Gateway Intents" (Member/Message Content) in the Discord Developer Portal.');
+    }
+});
