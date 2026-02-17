@@ -19,7 +19,8 @@ const {
     ButtonStyle,
     ModalBuilder,
     TextInputBuilder,
-    TextInputStyle
+    TextInputStyle,
+    MessageFlags // Added to resolve ephemeral deprecation
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
@@ -437,10 +438,10 @@ client.on('interactionCreate', async interaction => {
         }
         
         if (interaction.customId === 'server_mgmt_select') {
-            if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "Unauthorized.", ephemeral: true });
+            if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "Unauthorized.", flags: [MessageFlags.Ephemeral] });
             const guildId = interaction.values[0];
             const guild = await client.guilds.fetch(guildId).catch(() => null);
-            if (!guild) return interaction.reply({ content: "Server no longer accessible.", ephemeral: true });
+            if (!guild) return interaction.reply({ content: "Server no longer accessible.", flags: [MessageFlags.Ephemeral] });
 
             const owner = await guild.fetchOwner();
             const embed = new EmbedBuilder()
@@ -454,22 +455,22 @@ client.on('interactionCreate', async interaction => {
                 new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block/Blacklist').setStyle(ButtonStyle.Danger)
             );
 
-            await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+            await interaction.reply({ embeds: [embed], components: [row], flags: [MessageFlags.Ephemeral] });
         }
         return;
     }
 
     if (interaction.isButton()) {
-        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "Unauthorized.", ephemeral: true });
+        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "Unauthorized.", flags: [MessageFlags.Ephemeral] });
         const [prefix, action, targetId] = interaction.customId.split('_');
         if (prefix !== 'srv') return;
 
         if (action === 'invite') {
             const guild = await client.guilds.fetch(targetId).catch(() => null);
             const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(client.user).has('CreateInstantInvite'));
-            if (!channel) return interaction.reply({ content: "No permission to create invites.", ephemeral: true });
+            if (!channel) return interaction.reply({ content: "No permission to create invites.", flags: [MessageFlags.Ephemeral] });
             const invite = await channel.createInvite({ maxAge: 0, maxUses: 1 });
-            await interaction.reply({ content: `🔗 Invite created: ${invite.url}`, ephemeral: true });
+            await interaction.reply({ content: `🔗 Invite created: ${invite.url}`, flags: [MessageFlags.Ephemeral] });
         }
         
         if (action === 'dm') {
@@ -482,14 +483,14 @@ client.on('interactionCreate', async interaction => {
         if (action === 'leave') {
             const guild = await client.guilds.fetch(targetId).catch(() => null);
             await guild.leave();
-            await interaction.reply({ content: `✅ Left server: ${guild.name}`, ephemeral: true });
+            await interaction.reply({ content: `✅ Left server: ${guild.name}`, flags: [MessageFlags.Ephemeral] });
         }
 
         if (action === 'block') {
             const guild = await client.guilds.fetch(targetId).catch(() => null);
             await blacklistGuild(targetId);
             if (guild) await guild.leave().catch(() => {});
-            await interaction.reply({ content: `🚫 Server blacklisted and bot has left.`, ephemeral: true });
+            await interaction.reply({ content: `🚫 Server blacklisted and bot has left.`, flags: [MessageFlags.Ephemeral] });
         }
     }
 
@@ -500,9 +501,9 @@ client.on('interactionCreate', async interaction => {
             const text = interaction.fields.getTextInputValue('dm_text');
             try {
                 await user.send(`**Message from Bot Developer:**\n${text}`);
-                await interaction.reply({ content: `✅ Message sent to ${user.tag}`, ephemeral: true });
+                await interaction.reply({ content: `✅ Message sent to ${user.tag}`, flags: [MessageFlags.Ephemeral] });
             } catch (e) {
-                await interaction.reply({ content: `❌ Could not DM user (DMs likely closed).`, ephemeral: true });
+                await interaction.reply({ content: `❌ Could not DM user (DMs likely closed).`, flags: [MessageFlags.Ephemeral] });
             }
         }
     }
@@ -510,12 +511,12 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     
     if (interaction.commandName === 'servers') {
-        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ Access Denied: Developer Only.", ephemeral: true });
+        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ Access Denied: Developer Only.", flags: [MessageFlags.Ephemeral] });
         const guilds = client.guilds.cache.map(g => ({ label: g.name.substring(0, 25), value: g.id, description: `ID: ${g.id} | ${g.memberCount} members` }));
-        if (guilds.length === 0) return interaction.reply({ content: "Bot is not in any servers.", ephemeral: true });
+        if (guilds.length === 0) return interaction.reply({ content: "Bot is not in any servers.", flags: [MessageFlags.Ephemeral] });
         const select = new StringSelectMenuBuilder().setCustomId('server_mgmt_select').setPlaceholder('Select a server to manage...').addOptions(guilds.slice(0, 25));
         const row = new ActionRowBuilder().addComponents(select);
-        await interaction.reply({ content: "👤 **Bot Management Console**", components: [row], ephemeral: true });
+        await interaction.reply({ content: "👤 **Bot Management Console**", components: [row], flags: [MessageFlags.Ephemeral] });
     }
 
     if (interaction.commandName === 'setup') {
@@ -523,27 +524,27 @@ client.on('interactionCreate', async interaction => {
         const guildId = interaction.guildId;
         const newConfig = { channelId: targetChannel.id, activeAlerts: [], alertedEventKeys: [], lastAlertedEventTime: null, messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null } };
         guildConfigs.set(guildId, newConfig);
-        await interaction.reply({ content: `✅ Events configured for ${targetChannel}.`, ephemeral: true });
+        await interaction.reply({ content: `✅ Events configured for ${targetChannel}.`, flags: [MessageFlags.Ephemeral] });
         await updateEvents(guildId, true);
     }
 
     if (interaction.commandName === 'update') {
         const guildId = interaction.guildId;
-        if (!guildConfigs.has(guildId)) return interaction.reply({ content: "❌ Run `/setup` first!", ephemeral: true });
-        await interaction.reply({ content: '🔄 Forcing update...', ephemeral: true });
+        if (!guildConfigs.has(guildId)) return interaction.reply({ content: "❌ Run `/setup` first!", flags: [MessageFlags.Ephemeral] });
+        await interaction.reply({ content: '🔄 Forcing update...', flags: [MessageFlags.Ephemeral] });
         await updateEvents(guildId, true);
     }
 
     if (interaction.commandName === 'arc') {
         const arc = arcCache.find(a => a.id === interaction.options.getString('unit'));
-        if (!arc) return interaction.reply({ content: "❌ Intelligence not found.", ephemeral: true });
+        if (!arc) return interaction.reply({ content: "❌ Intelligence not found.", flags: [MessageFlags.Ephemeral] });
         const embed = new EmbedBuilder().setTitle(`🤖 Intelligence: ${arc.name}`).setDescription(arc.description).setColor(0x5865F2).setThumbnail(arc.icon).setImage(arc.image).setTimestamp();
         await interaction.reply({ embeds: [embed] });
     }
 
     if (interaction.commandName === 'item') {
         const item = itemCache.find(i => i.id === interaction.options.getString('name'));
-        if (!item) return interaction.reply({ content: "❌ Item not found.", ephemeral: true });
+        if (!item) return interaction.reply({ content: "❌ Item not found.", flags: [MessageFlags.Ephemeral] });
         const embed = new EmbedBuilder().setTitle(`📦 Item: ${item.name}`).setDescription(item.description || 'No description available.').setColor(rarityColors[item.rarity] || 0x5865F2).setThumbnail(item.icon).addFields({ name: 'Rarity', value: item.rarity || 'Common', inline: true }, { name: 'Type', value: item.item_type || 'Unknown', inline: true }, { name: 'Value', value: `🪙 ${item.value?.toLocaleString() || 0}`, inline: true });
         if (item.workbench) embed.addFields({ name: 'Crafting', value: `🛠️ ${item.workbench}`, inline: true });
         if (item.loot_area) embed.addFields({ name: 'Loot Area', value: `📍 ${item.loot_area}`, inline: true });
@@ -559,7 +560,7 @@ client.on('interactionCreate', async interaction => {
         if (selection.startsWith('category:')) {
             const catName = selection.split(':')[1];
             const items = traderItemsFlat.filter(i => i.item_type === catName);
-            if (items.length === 0) return interaction.reply({ content: "❌ No trader items found in this category.", ephemeral: true });
+            if (items.length === 0) return interaction.reply({ content: "❌ No trader items found in this category.", flags: [MessageFlags.Ephemeral] });
             const list = items.map(i => `• **${i.name}** sold by **${i.traderName}**`).join('\n');
             const embed = new EmbedBuilder().setTitle(`📁 Browsing Category: ${catName}`).setDescription(list).setColor(0x3498db);
             const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select an item to see details...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
@@ -569,7 +570,7 @@ client.on('interactionCreate', async interaction => {
         else if (selection.startsWith('trader:')) {
             const traderName = selection.split(':')[1];
             const items = traderCache[traderName];
-            if (!items) return interaction.reply({ content: "❌ Trader not found.", ephemeral: true });
+            if (!items) return interaction.reply({ content: "❌ Trader not found.", flags: [MessageFlags.Ephemeral] });
             const inventoryList = items.map(i => `• **${i.name}**\n└ 🪙 ${i.trader_price.toLocaleString()} (${i.rarity})`).join('\n');
             const embed = new EmbedBuilder().setTitle(`👤 Trader Inventory: ${traderName}`).setDescription(inventoryList || 'This trader is currently out of stock.').setColor(0x00AE86);
             const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder(`Select one of ${traderName}'s items...`).addOptions(items.slice(0, 25).map(i => ({ label: i.name, description: `Type: ${i.item_type} | Price: ${i.trader_price}`, value: i.id })));
@@ -607,14 +608,16 @@ client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
     if (!message.guild) {
-        // If the developer sends a DM, let's give a simple self-test response
+        // Developer logic
         if (message.author.id === OWNER_ID) {
+            console.log(`Developer DM received: ${message.content}`);
             if (message.content.toLowerCase() === 'ping') {
                 return message.reply('Pong! Developer Mode is active.');
             }
-            return; // Ignore other dev messages to avoid loops
+            return; 
         }
 
+        console.log(`Forwarding DM from ${message.author.tag} to developer.`);
         const dev = await client.users.fetch(OWNER_ID);
         const forwardEmbed = new EmbedBuilder()
             .setTitle(`📩 New DM received`)
@@ -633,7 +636,6 @@ client.on('messageCreate', async message => {
 
         try {
             await dev.send({ embeds: [forwardEmbed], components: [row] });
-            // Send confirmation to the user
             await message.reply("✅ Your message has been sent to the bot developer. They will get back to you if a response is needed.");
         } catch (e) {
             console.error("Failed to forward DM to owner:", e.message);
