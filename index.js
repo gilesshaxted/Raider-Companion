@@ -77,11 +77,8 @@ const QUESTS_API_URL = 'https://metaforge.app/api/arc-raiders/quests';
 const CHECK_INTERVAL = 60000;
 
 let guildConfigs = new Map();
+let activeGuildUpdates = new Set(); // NEW: Prevents parallel updates on the same guild
 
-/**
- * MAP CONFIGURATION
- * Updated with your specific asset filenames.
- */
 const mapConfigs = {
     'Dam': { color: 0x3498db, fileName: 'dam_battlegrounds.png' },
     'Buried City': { color: 0xe67e22, fileName: 'buried_city.png' },
@@ -114,7 +111,7 @@ const client = new Client({
 });
 
 let arcCache = [], itemCache = [], traderCache = {}, traderItemsFlat = [], traderCategories = [], questCache = [];
-let isAuthorized = false, isUpdating = false;
+let isAuthorized = false, isGlobalUpdating = false;
 
 // --- PERSISTENCE HELPERS ---
 async function ensureAuth() {
@@ -198,35 +195,29 @@ async function getOrCreateEventRole(guild, eventName) {
     } catch (e) { return null; }
 }
 
-/**
- * Loads a local image and converts it to a base64 Data URI for Discord native events
- */
 function getLocalImageAsDataURI(fileName) {
     if (!fileName) return null;
     const filePath = path.join(__dirname, 'assets', fileName);
-    if (!fs.existsSync(filePath)) {
-        console.warn(`⚠️ Asset missing for scheduled event: ${filePath}`);
-        return null;
-    }
+    if (!fs.existsSync(filePath)) return null;
     try {
         const buffer = fs.readFileSync(filePath);
-        const base64 = buffer.toString('base64');
-        return `data:image/png;base64,${base64}`;
-    } catch (err) {
-        console.error(`❌ Failed to read asset: ${fileName}`, err.message);
-        return null;
-    }
+        return `data:image/png;base64,${buffer.toString('base64')}`;
+    } catch (err) { return null; }
 }
 
 // --- BOT LOGIC ---
 async function updateEvents(targetGuildId = null, forceNewMessages = false) {
-    if (isUpdating && !targetGuildId) return;
-    if (!targetGuildId) isUpdating = true;
+    // 1. GLOBAL LOCK LOGIC
+    // If background loop is running, manual command must wait to prevent cross-contamination.
+    if (!targetGuildId) {
+        if (isGlobalUpdating) return;
+        isGlobalUpdating = true;
+    }
 
     try {
         const response = await axios.get(API_URL);
         const events = response.data?.data;
-        if (!events || !Array.isArray(events)) { isUpdating = false; return; }
+        if (!events || !Array.isArray(events)) return;
 
         const now = Date.now();
         const alertWindow = now + (60 * 60 * 1000); 
@@ -238,135 +229,142 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
 
         for (const [guildId, config] of guildsToUpdate) {
             if (!config || !config.channelId) continue;
-            let channel;
-            try { channel = await client.channels.fetch(config.channelId); } catch (err) { continue; }
-            if (!channel) continue;
+            
+            // PER-GUILD LOCK: Prevents multiple operations on the same guild data
+            if (activeGuildUpdates.has(guildId)) continue;
+            activeGuildUpdates.add(guildId);
 
-            const guild = channel.guild;
+            try {
+                let channel;
+                try { channel = await client.channels.fetch(config.channelId); } catch (err) { continue; }
+                if (!channel) continue;
 
-            // 1. Cleanup expired alerts
-            if (config.activeAlerts && config.activeAlerts.length > 0) {
-                const freshAlerts = [];
-                for (const alert of config.activeAlerts) {
-                    if (now >= alert.startTime) {
-                        try { const msg = await channel.messages.fetch(alert.messageId); await msg.delete(); } catch (err) {}
-                    } else { freshAlerts.push(alert); }
-                }
-                config.activeAlerts = freshAlerts;
-            }
+                const guild = channel.guild;
 
-            // 2. Scheduled Events Cleanup & Creation
-            let existingScheduledEvents = [];
-            try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
-
-            const seenSlots = new Set();
-            for (const se of existingScheduledEvents.values()) {
-                const key = `${se.scheduledStartTimestamp}_${se.entityMetadata?.location}`;
-                if (seenSlots.has(key)) {
-                    try { await se.delete(); } catch (e) {}
-                } else { seenSlots.add(key); }
-            }
-
-            const scorableEvents = events.filter(e => e.startTime > now && e.startTime <= scheduleWindow);
-            for (const e of scorableEvents) {
-                const alreadyScheduled = existingScheduledEvents.some(se => {
-                    const sameLocation = se.entityMetadata?.location === e.map;
-                    const sameTimeWindow = Math.abs(se.scheduledStartTimestamp - e.startTime) < 120000;
-                    return sameLocation && sameTimeWindow;
-                });
-
-                if (!alreadyScheduled) {
-                    try {
-                        const mapKey = Object.keys(mapConfigs).find(k => k.toLowerCase().replace(/\s/g, '') === e.map?.toLowerCase().replace(/\s/g, ''));
-                        const dataURI = mapKey ? getLocalImageAsDataURI(mapConfigs[mapKey].fileName) : null;
-
-                        await guild.scheduledEvents.create({
-                            name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
-                            scheduledStartTime: new Date(e.startTime),
-                            scheduledEndTime: new Date(e.endTime),
-                            privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
-                            entityType: GuildScheduledEventEntityType.External,
-                            entityMetadata: { location: e.map },
-                            image: dataURI, 
-                            description: `Upcoming in-game event rotation on ${e.map}. Be ready Raiders!`
-                        });
-                        console.log(`✅ Event Created: ${e.name} (${e.map})`);
-                    } catch (err) { console.error(`❌ Event Creation Error:`, err.message); }
+                // 1. Cleanup expired alerts
+                if (config.activeAlerts && config.activeAlerts.length > 0) {
+                    const freshAlerts = [];
+                    for (const alert of config.activeAlerts) {
+                        if (now >= alert.startTime) {
+                            try { const msg = await channel.messages.fetch(alert.messageId); await msg.delete(); } catch (err) {}
+                        } else { freshAlerts.push(alert); }
+                    }
+                    config.activeAlerts = freshAlerts;
                 }
 
-                // Channel Pings
-                if (e.startTime <= alertWindow) {
-                    const alertKey = `${e.name}_${e.map}_${e.startTime}`;
-                    if (!config.alertedEventKeys) config.alertedEventKeys = [];
-                    if (!config.alertedEventKeys.includes(alertKey)) {
-                        const role = await getOrCreateEventRole(guild, e.name);
-                        const roleMention = role ? `<@&${role.id}>` : `**${e.name}**`;
-                        const alertSent = await channel.send({
-                            content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!`
-                        });
-                        config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
-                        config.alertedEventKeys.push(alertKey);
-                        if (config.alertedEventKeys.length > 100) config.alertedEventKeys = config.alertedEventKeys.slice(-100);
+                // 2. Scheduled Events Cleanup & Creation
+                let existingScheduledEvents = [];
+                try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
+
+                const seenSlots = new Set();
+                for (const se of existingScheduledEvents.values()) {
+                    const key = `${se.scheduledStartTimestamp}_${se.entityMetadata?.location}`;
+                    if (seenSlots.has(key)) {
+                        try { await se.delete(); } catch (e) {}
+                    } else { seenSlots.add(key); }
+                }
+
+                const scorableEvents = events.filter(e => e.startTime > now && e.startTime <= scheduleWindow);
+                for (const e of scorableEvents) {
+                    const alreadyScheduled = existingScheduledEvents.some(se => {
+                        const sameLocation = se.entityMetadata?.location === e.map;
+                        const sameTimeWindow = Math.abs(se.scheduledStartTimestamp - e.startTime) < 120000;
+                        return sameLocation && sameTimeWindow;
+                    });
+
+                    if (!alreadyScheduled) {
+                        try {
+                            const mapKey = Object.keys(mapConfigs).find(k => k.toLowerCase().replace(/\s/g, '') === e.map?.toLowerCase().replace(/\s/g, ''));
+                            const dataURI = mapKey ? getLocalImageAsDataURI(mapConfigs[mapKey].fileName) : null;
+
+                            await guild.scheduledEvents.create({
+                                name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
+                                scheduledStartTime: new Date(e.startTime),
+                                scheduledEndTime: new Date(e.endTime),
+                                privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+                                entityType: GuildScheduledEventEntityType.External,
+                                entityMetadata: { location: e.map },
+                                image: dataURI, 
+                                description: `Upcoming in-game event rotation on ${e.map}. Be ready Raiders!`
+                            });
+                        } catch (err) {}
+                    }
+
+                    if (e.startTime <= alertWindow) {
+                        const alertKey = `${e.name}_${e.map}_${e.startTime}`;
+                        if (!config.alertedEventKeys) config.alertedEventKeys = [];
+                        if (!config.alertedEventKeys.includes(alertKey)) {
+                            const role = await getOrCreateEventRole(guild, e.name);
+                            const roleMention = role ? `<@&${role.id}>` : `**${e.name}**`;
+                            const alertSent = await channel.send({
+                                content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!`
+                            });
+                            config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
+                            config.alertedEventKeys.push(alertKey);
+                            if (config.alertedEventKeys.length > 100) config.alertedEventKeys = config.alertedEventKeys.slice(-100);
+                        }
                     }
                 }
-            }
 
-            // 4. Map Embeds (using local attachments)
-            if (forceNewMessages) {
-                for (const key in config.messageIds) {
-                    if (config.messageIds[key]) {
-                        try { const m = await channel.messages.fetch(config.messageIds[key]); await m.delete(); } catch (e) {}
-                        config.messageIds[key] = null;
+                // 4. Map Embeds
+                if (forceNewMessages) {
+                    for (const key in config.messageIds) {
+                        if (config.messageIds[key]) {
+                            try { const m = await channel.messages.fetch(config.messageIds[key]); await m.delete(); } catch (e) {}
+                            config.messageIds[key] = null;
+                        }
                     }
                 }
-            }
 
-            for (const [mapName, mapSet] of Object.entries(mapConfigs)) {
-                const mapEvents = events.filter(e => e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, ''));
-                const activeEvent = mapEvents.find(e => e.startTime <= now && e.endTime > now);
-                const upcoming = mapEvents.filter(e => e.startTime > now).sort((a, b) => a.startTime - b.startTime).slice(0, 3);
+                for (const [mapName, mapSet] of Object.entries(mapConfigs)) {
+                    const mapEvents = events.filter(e => e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, ''));
+                    const activeEvent = mapEvents.find(e => e.startTime <= now && e.endTime > now);
+                    const upcoming = mapEvents.filter(e => e.startTime > now).sort((a, b) => a.startTime - b.startTime).slice(0, 3);
 
-                const imagePath = path.join(__dirname, 'assets', mapSet.fileName);
-                const file = fs.existsSync(imagePath) ? new AttachmentBuilder(imagePath) : null;
+                    const imagePath = path.join(__dirname, 'assets', mapSet.fileName);
+                    const file = fs.existsSync(imagePath) ? new AttachmentBuilder(imagePath) : null;
 
-                const embed = new EmbedBuilder()
-                    .setTitle(`📍 ${mapName}`).setColor(mapSet.color)
-                    .setTimestamp().setFooter({ text: `metaforge.app/arc-raiders` });
+                    const embed = new EmbedBuilder()
+                        .setTitle(`📍 ${mapName}`).setColor(mapSet.color)
+                        .setTimestamp().setFooter({ text: `metaforge.app/arc-raiders` });
 
-                if (file) {
-                    embed.setImage(`attachment://${mapSet.fileName}`);
+                    if (file) { embed.setImage(`attachment://${mapSet.fileName}`); }
+
+                    if (activeEvent) {
+                        embed.addFields({ name: '📡 Status', value: `🟢 **LIVE:** ${getEmoji(activeEvent.name)} **${activeEvent.name}**\nEnds <t:${Math.floor(activeEvent.endTime / 1000)}:R>` });
+                        if (activeEvent.icon) embed.setThumbnail(activeEvent.icon);
+                    } else { embed.addFields({ name: '📡 Status', value: '⚪ **Offline**' }); }
+
+                    upcoming.forEach((e, i) => {
+                        embed.addFields({ name: `Next Up #${i + 1}`, value: `${getEmoji(e.name)} **${e.name}**\n<t:${Math.floor(e.startTime / 1000)}:R>`, inline: true });
+                    });
+                    
+                    await syncMessageWithFile(channel, config, mapName, embed, file);
                 }
 
-                if (activeEvent) {
-                    embed.addFields({ name: '📡 Status', value: `🟢 **LIVE:** ${getEmoji(activeEvent.name)} **${activeEvent.name}**\nEnds <t:${Math.floor(activeEvent.endTime / 1000)}:R>` });
-                    if (activeEvent.icon) embed.setThumbnail(activeEvent.icon);
-                } else { embed.addFields({ name: '📡 Status', value: '⚪ **Offline**' }); }
+                const current = events.filter(e => e.startTime <= now && e.endTime > now);
+                const summary = new EmbedBuilder()
+                    .setTitle('🛸 ARC Raiders - Live Summary').setColor(0x00AE86)
+                    .setDescription('React to this message with an emoji below to get the notification role!')
+                    .setFooter({ text: `Data provided by metaforge.app/arc-raiders` }).setTimestamp();
 
-                upcoming.forEach((e, i) => {
-                    embed.addFields({ name: `Next Up #${i + 1}`, value: `${getEmoji(e.name)} **${e.name}**\n<t:${Math.floor(e.startTime / 1000)}:R>`, inline: true });
-                });
-                
-                await syncMessageWithFile(channel, config, mapName, embed, file);
+                if (current.length > 0) {
+                    summary.addFields({ name: '✅ Currently Active', value: current.map(e => `${getEmoji(e.name)} **${e.name}**\n└ *${e.map}*\n────────────────`).join('\n') });
+                } else { summary.addFields({ name: '✅ Currently Active', value: 'No events currently active.' }); }
+
+                const summarySent = await syncMessage(channel, config, 'Summary', summary);
+                if (summarySent && forceNewMessages) {
+                    for (const emoji of Object.values(eventEmojis)) { try { await summarySent.react(emoji); } catch (e) {} }
+                }
+                await saveGuildConfig(guildId);
+
+            } finally {
+                activeGuildUpdates.delete(guildId); // Release lock for this guild
             }
-
-            // Summary Embed
-            const current = events.filter(e => e.startTime <= now && e.endTime > now);
-            const summary = new EmbedBuilder()
-                .setTitle('🛸 ARC Raiders - Live Summary').setColor(0x00AE86)
-                .setDescription('React to this message with an emoji below to get the notification role!')
-                .setFooter({ text: `Data provided by metaforge.app/arc-raiders` }).setTimestamp();
-
-            if (current.length > 0) {
-                summary.addFields({ name: '✅ Currently Active', value: current.map(e => `${getEmoji(e.name)} **${e.name}**\n└ *${e.map}*\n────────────────`).join('\n') });
-            } else { summary.addFields({ name: '✅ Currently Active', value: 'No events currently active.' }); }
-
-            const summarySent = await syncMessage(channel, config, 'Summary', summary);
-            if (summarySent && forceNewMessages) {
-                for (const emoji of Object.values(eventEmojis)) { try { await summarySent.react(emoji); } catch (e) {} }
-            }
-            await saveGuildConfig(guildId);
         }
-    } catch (error) { console.error('Update loop error:', error.message); } finally { if (!targetGuildId) isUpdating = false; }
+    } catch (error) { console.error('Update loop error:', error.message); } finally { 
+        if (!targetGuildId) isGlobalUpdating = false; 
+    }
 }
 
 async function syncMessage(channel, config, key, embed) {
@@ -376,9 +374,6 @@ async function syncMessage(channel, config, key, embed) {
     } else { const sent = await channel.send({ embeds: [embed] }); config.messageIds[key] = sent.id; return sent; }
 }
 
-/**
- * Specialized sync function to handle local file attachments for map images
- */
 async function syncMessageWithFile(channel, config, key, embed, file) {
     const files = file ? [file] : [];
     if (config.messageIds[key]) {
@@ -525,11 +520,7 @@ client.on('interactionCreate', async interaction => {
 client.on('messageReactionAdd', (reaction, user) => handleReaction(reaction, user, true));
 client.on('messageReactionRemove', (reaction, user) => handleReaction(reaction, user, false));
 
-client.on('messageCreate', async message => {
-    if (message.author.bot) return;
-    const config = guildConfigs.get(message.guildId);
-    if (config && message.channel.id === config.channelId) updateEvents(message.guildId, true);
-});
+// REMOVED: messageCreate trigger. Background loop + manual /update is enough.
 
 client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
