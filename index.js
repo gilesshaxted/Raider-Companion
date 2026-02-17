@@ -12,7 +12,8 @@ const {
     StringSelectMenuBuilder,
     GuildScheduledEventPrivacyLevel,
     GuildScheduledEventEntityType,
-    ActivityType 
+    ActivityType,
+    Partials 
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
@@ -22,13 +23,14 @@ const { initializeApp } = require('firebase/app');
 const { getFirestore, doc, getDoc, setDoc, collection, getDocs } = require('firebase/firestore');
 const { getAuth, signInAnonymously } = require('firebase/auth');
 
+// Configuration now pulled from Environment Variables for security
 const firebaseConfig = {
-    apiKey: "AIzaSyDFwBoTXmTxhh3lbDmVLlE7FIgw2syS0fQ",
-    authDomain: "raider-companion.firebaseapp.com",
-    projectId: "raider-companion",
-    storageBucket: "raider-companion.firebasestorage.app",
-    messagingSenderId: "1090143955392",
-    appId: "1:1090143955392:web:37d509027eb7833e3d8025"
+    apiKey: process.env.FIREBASE_API_KEY,
+    authDomain: process.env.FIREBASE_AUTH_DOMAIN,
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
+    appId: process.env.FIREBASE_APP_ID
 };
 
 const app = initializeApp(firebaseConfig);
@@ -81,10 +83,16 @@ const getEmoji = (name) => eventEmojis[name] || '🛸';
 
 const client = new Client({
     intents: [
-        'Guilds',
-        'GuildMessages',
-        'MessageContent',
-        'GuildScheduledEvents' 
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildScheduledEvents,
+        GatewayIntentBits.GuildMessageReactions 
+    ],
+    partials: [
+        Partials.Message, 
+        Partials.Reaction, 
+        Partials.User
     ]
 });
 
@@ -181,16 +189,12 @@ async function getOrCreateEventRole(guild, eventName) {
                 color: 0x5865F2
             });
         }
-        return `<@&${role.id}>`;
+        return role;
     } catch (e) {
-        return `**${eventName}**`;
+        return null;
     }
 }
 
-/**
- * Fetches an image and returns a base64 Data URI. 
- * This is the format required by Discord for Scheduled Event cover images.
- */
 async function fetchImageAsDataURI(url) {
     if (!url) return null;
     try {
@@ -199,7 +203,6 @@ async function fetchImageAsDataURI(url) {
         const base64 = buffer.toString('base64');
         return `data:image/png;base64,${base64}`;
     } catch (err) {
-        console.error(`Failed to fetch image for data URI: ${url}`, err.message);
         return null;
     }
 }
@@ -236,7 +239,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
 
             const guild = channel.guild;
 
-            // 1. CLEANUP EXPIRED ALERTS
             if (config.activeAlerts && config.activeAlerts.length > 0) {
                 const freshAlerts = [];
                 for (const alert of config.activeAlerts) {
@@ -252,19 +254,15 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 config.activeAlerts = freshAlerts;
             }
 
-            // 2. DISCORD SCHEDULED EVENTS SYNC & DUPLICATE REMOVAL
             let existingScheduledEvents = [];
             try {
                 existingScheduledEvents = await guild.scheduledEvents.fetch();
-            } catch (e) { console.error("Could not fetch scheduled events:", e.message); }
+            } catch (e) {}
 
-            // --- DUPLICATE PURGE ---
-            // If there are multiple Discord events for the same map/time/name, delete extras.
             const seenKeys = new Set();
             for (const se of existingScheduledEvents.values()) {
                 const key = `${se.scheduledStartTimestamp}_${se.entityMetadata?.location}_${se.name.toLowerCase()}`;
                 if (seenKeys.has(key)) {
-                    console.log(`Deleting duplicate native event: ${se.name}`);
                     try { await se.delete(); } catch (e) {}
                 } else {
                     seenKeys.add(key);
@@ -285,7 +283,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                         const mapKey = Object.keys(mapConfigs).find(k => 
                             k.toLowerCase().replace(/\s/g, '') === e.map?.toLowerCase().replace(/\s/g, '')
                         );
-                        
                         const mapImage = mapKey ? mapConfigs[mapKey].image : null;
                         const dataURI = await fetchImageAsDataURI(mapImage);
 
@@ -296,22 +293,19 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                             privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
                             entityType: GuildScheduledEventEntityType.External,
                             entityMetadata: { location: e.map },
-                            image: dataURI, // Use Data URI for cover
+                            image: dataURI, 
                             description: `Upcoming in-game event rotation on ${e.map}. Be ready Raiders!`
                         });
-                        console.log(`Created event for ${e.name} with cover.`);
-                    } catch (err) {
-                        console.error(`Failed to create scheduled event for ${e.name}:`, err.message);
-                    }
+                    } catch (err) {}
                 }
 
-                // 3. CHANNEL PING LOGIC
                 if (e.startTime <= alertWindow) {
                     const alertKey = `${e.name}_${e.map}_${e.startTime}`;
                     if (!config.alertedEventKeys) config.alertedEventKeys = [];
                     
                     if (!config.alertedEventKeys.includes(alertKey)) {
-                        const roleMention = await getOrCreateEventRole(guild, e.name);
+                        const role = await getOrCreateEventRole(guild, e.name);
+                        const roleMention = role ? `<@&${role.id}>` : `**${e.name}**`;
                         const alertSent = await channel.send({
                             content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!`
                         });
@@ -326,7 +320,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 }
             }
 
-            // 4. LIVE EMBED UPDATES
             if (forceNewMessages) {
                 for (const key in config.messageIds) {
                     if (config.messageIds[key]) {
@@ -369,6 +362,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
             const summary = new EmbedBuilder()
                 .setTitle('🛸 ARC Raiders - Live Summary')
                 .setColor(0x00AE86)
+                .setDescription('React to this message with an emoji below to get the notification role for that specific event rotation!')
                 .setFooter({ text: `Data provided by metaforge.app/arc-raiders` })
                 .setTimestamp();
 
@@ -378,7 +372,14 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 summary.addFields({ name: '✅ Currently Active', value: 'No events currently active.' });
             }
 
-            await syncMessage(channel, config, 'Summary', summary);
+            const summarySent = await syncMessage(channel, config, 'Summary', summary);
+            
+            if (summarySent && forceNewMessages) {
+                for (const emoji of Object.values(eventEmojis)) {
+                    try { await summarySent.react(emoji); } catch (e) {}
+                }
+            }
+
             await saveGuildConfig(guildId);
         }
 
@@ -393,14 +394,16 @@ async function syncMessage(channel, config, key, embed) {
     if (config.messageIds[key]) {
         try {
             const msg = await channel.messages.fetch(config.messageIds[key]);
-            await msg.edit({ embeds: [embed] });
+            return await msg.edit({ embeds: [embed] });
         } catch (e) {
             const sent = await channel.send({ embeds: [embed] });
             config.messageIds[key] = sent.id;
+            return sent;
         }
     } else {
         const sent = await channel.send({ embeds: [embed] });
         config.messageIds[key] = sent.id;
+        return sent;
     }
 }
 
@@ -462,20 +465,44 @@ const commandsData = [
         .toJSON()
 ];
 
+// --- REACTION HANDLER HELPERS ---
+async function handleReaction(reaction, user, add = true) {
+    if (user.bot) return;
+    if (reaction.partial) {
+        try { await reaction.fetch(); } catch (e) { return; }
+    }
+
+    const guildId = reaction.message.guildId;
+    const config = guildConfigs.get(guildId);
+    if (!config || reaction.message.id !== config.messageIds.Summary) return;
+
+    const eventName = Object.keys(eventEmojis).find(key => eventEmojis[key] === reaction.emoji.name);
+    if (!eventName) return;
+
+    const guild = reaction.message.guild;
+    const member = await guild.members.fetch(user.id);
+    const role = await getOrCreateEventRole(guild, eventName);
+
+    if (role) {
+        if (add) {
+            await member.roles.add(role);
+        } else {
+            await member.roles.remove(role);
+        }
+    }
+}
+
 client.on('interactionCreate', async interaction => {
     if (interaction.isAutocomplete()) {
         const focusedValue = interaction.options.getFocused().toLowerCase();
-        
         if (interaction.commandName === 'arc') {
             const choices = arcCache.filter(arc => arc.name.toLowerCase().includes(focusedValue));
             await interaction.respond(choices.slice(0, 25).map(arc => ({ name: arc.name, value: arc.id })));
         }
-        
         if (interaction.commandName === 'item') {
             const choices = itemCache.filter(item => item.name.toLowerCase().includes(focusedValue));
             await interaction.respond(choices.slice(0, 25).map(item => ({ name: item.name, value: item.id })));
         }
-
         if (interaction.commandName === 'traders') {
             const results = [];
             Object.keys(traderCache).forEach(name => {
@@ -490,7 +517,6 @@ client.on('interactionCreate', async interaction => {
             });
             await interaction.respond(results.slice(0, 25));
         }
-
         if (interaction.commandName === 'quests') {
             const choices = questCache.filter(q => q.name.toLowerCase().includes(focusedValue));
             await interaction.respond(choices.slice(0, 25).map(q => ({ name: q.name, value: q.id })));
@@ -514,7 +540,6 @@ client.on('interactionCreate', async interaction => {
     if (interaction.commandName === 'setup') {
         const targetChannel = interaction.options.getChannel('channel');
         const guildId = interaction.guildId;
-        
         const newConfig = {
             channelId: targetChannel.id,
             activeAlerts: [],
@@ -522,7 +547,6 @@ client.on('interactionCreate', async interaction => {
             lastAlertedEventTime: null,
             messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null }
         };
-        
         guildConfigs.set(guildId, newConfig);
         await interaction.reply({ content: `✅ Events will now be posted and kept current in ${targetChannel} for this server.`, ephemeral: true });
         await updateEvents(guildId, true);
@@ -531,7 +555,6 @@ client.on('interactionCreate', async interaction => {
     if (interaction.commandName === 'update') {
         const guildId = interaction.guildId;
         if (!guildConfigs.has(guildId)) return interaction.reply({ content: "❌ Please run `/setup` first!", ephemeral: true });
-        
         await interaction.reply({ content: '🔄 Forcing update of all event embeds in this server...', ephemeral: true });
         await updateEvents(guildId, true);
     }
@@ -539,62 +562,34 @@ client.on('interactionCreate', async interaction => {
     if (interaction.commandName === 'arc') {
         const arc = arcCache.find(a => a.id === interaction.options.getString('unit'));
         if (!arc) return interaction.reply({ content: "❌ Intelligence not found.", ephemeral: true });
-
         const embed = new EmbedBuilder()
-            .setTitle(`🤖 Intelligence: ${arc.name}`)
-            .setDescription(arc.description)
-            .setColor(0x5865F2)
-            .setThumbnail(arc.icon)
-            .setImage(arc.image)
-            .setTimestamp();
+            .setTitle(`🤖 Intelligence: ${arc.name}`).setDescription(arc.description).setColor(0x5865F2)
+            .setThumbnail(arc.icon).setImage(arc.image).setTimestamp();
         await interaction.reply({ embeds: [embed] });
     }
 
     if (interaction.commandName === 'item') {
         const item = itemCache.find(i => i.id === interaction.options.getString('name'));
         if (!item) return interaction.reply({ content: "❌ Item not found.", ephemeral: true });
-
-        const embed = new EmbedBuilder()
-            .setTitle(`📦 Item: ${item.name}`)
-            .setDescription(item.description || 'No description available.')
-            .setColor(rarityColors[item.rarity] || 0x5865F2)
-            .setThumbnail(item.icon)
-            .addFields(
-                { name: 'Rarity', value: item.rarity || 'Common', inline: true },
-                { name: 'Type', value: item.item_type || 'Unknown', inline: true },
-                { name: 'Value', value: `🪙 ${item.value?.toLocaleString() || 0}`, inline: true }
-            );
-
+        const embed = new EmbedBuilder().setTitle(`📦 Item: ${item.name}`).setDescription(item.description || 'No description available.').setColor(rarityColors[item.rarity] || 0x5865F2).setThumbnail(item.icon).addFields({ name: 'Rarity', value: item.rarity || 'Common', inline: true }, { name: 'Type', value: item.item_type || 'Unknown', inline: true }, { name: 'Value', value: `🪙 ${item.value?.toLocaleString() || 0}`, inline: true });
         if (item.workbench) embed.addFields({ name: 'Crafting', value: `🛠️ ${item.workbench}`, inline: true });
         if (item.loot_area) embed.addFields({ name: 'Loot Area', value: `📍 ${item.loot_area}`, inline: true });
-
         if (item.stat_block) {
-            const stats = Object.entries(item.stat_block)
-                .filter(([_, v]) => v !== 0 && v !== null && v !== "")
-                .map(([k, v]) => `• **${k.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase())}:** ${v}`)
-                .join('\n');
+            const stats = Object.entries(item.stat_block).filter(([_, v]) => v !== 0 && v !== null && v !== "").map(([k, v]) => `• **${k.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase())}:** ${v}`).join('\n');
             if (stats) embed.addFields({ name: '📊 Statistics', value: stats });
         }
-
         await interaction.reply({ embeds: [embed] });
     }
 
     if (interaction.commandName === 'traders') {
         const selection = interaction.options.getString('name');
-        
         if (selection.startsWith('category:')) {
             const catName = selection.split(':')[1];
             const items = traderItemsFlat.filter(i => i.item_type === catName);
             if (items.length === 0) return interaction.reply({ content: "❌ No trader items found in this category.", ephemeral: true });
             const list = items.map(i => `• **${i.name}** sold by **${i.traderName}** (🪙 ${i.trader_price.toLocaleString()})`).join('\n');
-            const embed = new EmbedBuilder()
-                .setTitle(`📁 Browsing Category: ${catName}`)
-                .setDescription(list)
-                .setColor(0x3498db);
-            const select = new StringSelectMenuBuilder()
-                .setCustomId('trader_item_select')
-                .setPlaceholder('Select an item to see details...')
-                .addOptions(items.slice(0, 25).map(i => ({ label: i.name, description: `Seller: ${i.traderName} | Price: ${i.trader_price}`, value: i.id })));
+            const embed = new EmbedBuilder().setTitle(`📁 Browsing Category: ${catName}`).setDescription(list).setColor(0x3498db);
+            const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select an item to see details...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, description: `Seller: ${i.traderName} | Price: ${i.trader_price}`, value: i.id })));
             const row = new ActionRowBuilder().addComponents(select);
             await interaction.reply({ embeds: [embed], components: [row] });
         }
@@ -603,14 +598,8 @@ client.on('interactionCreate', async interaction => {
             const items = traderCache[traderName];
             if (!items) return interaction.reply({ content: "❌ Trader not found.", ephemeral: true });
             const inventoryList = items.map(i => `• **${i.name}**\n└ 🪙 ${i.trader_price.toLocaleString()} (${i.rarity})`).join('\n');
-            const embed = new EmbedBuilder()
-                .setTitle(`👤 Trader Inventory: ${traderName}`)
-                .setDescription(inventoryList || 'This trader is currently out of stock.')
-                .setColor(0x00AE86);
-            const select = new StringSelectMenuBuilder()
-                .setCustomId('trader_item_select')
-                .setPlaceholder(`Select one of ${traderName}'s items...`)
-                .addOptions(items.slice(0, 25).map(i => ({ label: i.name, description: `Type: ${i.item_type} | Price: ${i.trader_price}`, value: i.id })));
+            const embed = new EmbedBuilder().setTitle(`👤 Trader Inventory: ${traderName}`).setDescription(inventoryList || 'This trader is currently out of stock.').setColor(0x00AE86);
+            const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder(`Select one of ${traderName}'s items...`).addOptions(items.slice(0, 25).map(i => ({ label: i.name, description: `Type: ${i.item_type} | Price: ${i.trader_price}`, value: i.id })));
             const row = new ActionRowBuilder().addComponents(select);
             await interaction.reply({ embeds: [embed], components: [row] });
         } 
@@ -623,11 +612,7 @@ client.on('interactionCreate', async interaction => {
             const res = await axios.get(`${QUESTS_API_URL}?id=${questId}&page=1`);
             const quest = res.data?.data;
             if (!quest) return interaction.editReply("❌ Quest data could not be retrieved.");
-            const embed = new EmbedBuilder()
-                .setTitle(`📜 Quest: ${quest.name}`)
-                .setColor(0x3498db)
-                .setThumbnail(quest.image)
-                .setTimestamp();
+            const embed = new EmbedBuilder().setTitle(`📜 Quest: ${quest.name}`).setColor(0x3498db).setThumbnail(quest.image).setTimestamp();
             if (quest.trader_name) embed.addFields({ name: '👤 Giver', value: quest.trader_name, inline: true });
             if (quest.xp > 0) embed.addFields({ name: '✨ XP Reward', value: `\`${quest.xp.toLocaleString()}\``, inline: true });
             if (quest.objectives && quest.objectives.length > 0) {
@@ -653,6 +638,10 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
+// --- REACTION LISTENERS ---
+client.on('messageReactionAdd', async (reaction, user) => handleReaction(reaction, user, true));
+client.on('messageReactionRemove', async (reaction, user) => handleReaction(reaction, user, false));
+
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
     const config = guildConfigs.get(message.guildId);
@@ -661,7 +650,7 @@ client.on('messageCreate', async message => {
 
 client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    client.user.setActivity('Data from Metaforge', { type: ActivityType.Watching });
+    client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
     await loadAllConfigs();
     await refreshCaches();
     
