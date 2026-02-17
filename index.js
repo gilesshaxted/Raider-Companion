@@ -112,9 +112,15 @@ const client = new Client({
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildScheduledEvents,
         GatewayIntentBits.GuildMessageReactions,
-        GatewayIntentBits.GuildMembers // Required to fetch guild owners for management
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.DirectMessages // REQUIRED: To see incoming DMs
     ],
-    partials: [Partials.Message, Partials.Reaction, Partials.User]
+    partials: [
+        Partials.Message, 
+        Partials.Reaction, 
+        Partials.User,
+        Partials.Channel // REQUIRED: To receive DMs from people bot isn't currently tracking
+    ]
 });
 
 let arcCache = [], itemCache = [], traderCache = {}, traderItemsFlat = [], traderCategories = [], questCache = [];
@@ -160,7 +166,6 @@ async function loadAllConfigs() {
                 guildConfigs.set(guildId, data);
             }
         });
-        console.log(`Loaded configs for ${guildConfigs.size} guilds.`);
     } catch (e) { console.error("Error loading configs:", e.message); }
 }
 
@@ -392,7 +397,6 @@ const commandsData = [
     new SlashCommandBuilder().setName('item').setDescription('Lookup an item, weapon, or material').addStringOption(option => option.setName('name').setDescription('Search for an item').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('traders').setDescription('View trader inventories or find where an item is sold').addStringOption(option => option.setName('name').setDescription('Search for a Trader or Category (e.g. Weapon)').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('quests').setDescription('View detailed objectives and rewards for ARC Raiders quests').addStringOption(option => option.setName('name').setDescription('Search for a quest name').setRequired(true).setAutocomplete(true)).toJSON(),
-    // NEW: Owner-only management command
     new SlashCommandBuilder().setName('servers').setDescription('Manage servers the bot is in (Owner Only)').toJSON()
 ];
 
@@ -411,7 +415,6 @@ async function handleReaction(reaction, user, add = true) {
 }
 
 client.on('interactionCreate', async interaction => {
-    // 1. Autocomplete
     if (interaction.isAutocomplete()) {
         const focusedValue = interaction.options.getFocused().toLowerCase();
         if (interaction.commandName === 'arc') { const choices = arcCache.filter(arc => arc.name.toLowerCase().includes(focusedValue)); await interaction.respond(choices.slice(0, 25).map(arc => ({ name: arc.name, value: arc.id }))); }
@@ -426,7 +429,6 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
-    // 2. Select Menus
     if (interaction.isStringSelectMenu()) {
         if (interaction.customId === 'trader_item_select') {
             const itemId = interaction.values[0];
@@ -434,7 +436,6 @@ client.on('interactionCreate', async interaction => {
             if (item) { await interaction.reply({ embeds: [buildTraderItemEmbed(item)], ephemeral: true }); }
         }
         
-        // NEW: Server Management Selection
         if (interaction.customId === 'server_mgmt_select') {
             if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "Unauthorized.", ephemeral: true });
             const guildId = interaction.values[0];
@@ -443,19 +444,12 @@ client.on('interactionCreate', async interaction => {
 
             const owner = await guild.fetchOwner();
             const embed = new EmbedBuilder()
-                .setTitle(`🏠 Server Details: ${guild.name}`)
-                .setColor(0x5865F2)
-                .setThumbnail(guild.iconURL())
-                .addFields(
-                    { name: 'ID', value: `\`${guild.id}\``, inline: true },
-                    { name: 'Owner', value: `${owner.user.tag} (\`${owner.id}\`)`, inline: true },
-                    { name: 'Members', value: guild.memberCount.toString(), inline: true },
-                    { name: 'Age', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:R>`, inline: true }
-                );
+                .setTitle(`🏠 Server Details: ${guild.name}`).setColor(0x5865F2).setThumbnail(guild.iconURL())
+                .addFields({ name: 'ID', value: `\`${guild.id}\``, inline: true }, { name: 'Owner', value: `${owner.user.tag} (\`${owner.id}\`)`, inline: true }, { name: 'Members', value: guild.memberCount.toString(), inline: true }, { name: 'Age', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:R>`, inline: true });
 
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Create Invite').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId(`srv_dm_${guild.id}`).setLabel('DM Owner').setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder().setCustomId(`srv_dm_${owner.id}`).setLabel('DM Owner').setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave Server').setStyle(ButtonStyle.Danger),
                 new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block/Blacklist').setStyle(ButtonStyle.Danger)
             );
@@ -465,16 +459,13 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
-    // 3. Buttons
     if (interaction.isButton()) {
         if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "Unauthorized.", ephemeral: true });
         const [prefix, action, targetId] = interaction.customId.split('_');
         if (prefix !== 'srv') return;
 
-        const guild = await client.guilds.fetch(targetId).catch(() => null);
-        if (!guild && action !== 'unblock') return interaction.reply({ content: "Server not found.", ephemeral: true });
-
         if (action === 'invite') {
+            const guild = await client.guilds.fetch(targetId).catch(() => null);
             const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(client.user).has('CreateInstantInvite'));
             if (!channel) return interaction.reply({ content: "No permission to create invites.", ephemeral: true });
             const invite = await channel.createInvite({ maxAge: 0, maxUses: 1 });
@@ -482,50 +473,47 @@ client.on('interactionCreate', async interaction => {
         }
         
         if (action === 'dm') {
-            const modal = new ModalBuilder().setCustomId(`srv_modal_dm_${targetId}`).setTitle('Message Owner');
+            // targetId here is the User ID of the owner
+            const modal = new ModalBuilder().setCustomId(`srv_modal_dm_${targetId}`).setTitle('Message User');
             const input = new TextInputBuilder().setCustomId('dm_text').setLabel('Message content').setStyle(TextInputStyle.Paragraph).setRequired(true);
             modal.addComponents(new ActionRowBuilder().addComponents(input));
             await interaction.showModal(modal);
         }
 
         if (action === 'leave') {
+            const guild = await client.guilds.fetch(targetId).catch(() => null);
             await guild.leave();
             await interaction.reply({ content: `✅ Left server: ${guild.name}`, ephemeral: true });
         }
 
         if (action === 'block') {
+            const guild = await client.guilds.fetch(targetId).catch(() => null);
             await blacklistGuild(targetId);
-            await guild.leave().catch(() => {});
+            if (guild) await guild.leave().catch(() => {});
             await interaction.reply({ content: `🚫 Server blacklisted and bot has left.`, ephemeral: true });
         }
     }
 
-    // 4. Modals
     if (interaction.isModalSubmit()) {
         if (interaction.customId.startsWith('srv_modal_dm_')) {
-            const targetGuildId = interaction.customId.replace('srv_modal_dm_', '');
-            const guild = await client.guilds.fetch(targetGuildId);
-            const owner = await guild.fetchOwner();
+            const targetUserId = interaction.customId.replace('srv_modal_dm_', '');
+            const user = await client.users.fetch(targetUserId);
             const text = interaction.fields.getTextInputValue('dm_text');
-            
             try {
-                await owner.send(`**Message from Bot Developer:**\n${text}`);
-                await interaction.reply({ content: `✅ Message sent to ${owner.user.tag}`, ephemeral: true });
+                await user.send(`**Message from Bot Developer:**\n${text}`);
+                await interaction.reply({ content: `✅ Message sent to ${user.tag}`, ephemeral: true });
             } catch (e) {
-                await interaction.reply({ content: `❌ Could not DM owner (DMs likely closed).`, ephemeral: true });
+                await interaction.reply({ content: `❌ Could not DM user (DMs likely closed).`, ephemeral: true });
             }
         }
     }
 
-    // 5. Chat Commands
     if (!interaction.isChatInputCommand()) return;
     
     if (interaction.commandName === 'servers') {
         if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ Access Denied: Developer Only.", ephemeral: true });
-        
         const guilds = client.guilds.cache.map(g => ({ label: g.name.substring(0, 25), value: g.id, description: `ID: ${g.id} | ${g.memberCount} members` }));
         if (guilds.length === 0) return interaction.reply({ content: "Bot is not in any servers.", ephemeral: true });
-
         const select = new StringSelectMenuBuilder().setCustomId('server_mgmt_select').setPlaceholder('Select a server to manage...').addOptions(guilds.slice(0, 25));
         const row = new ActionRowBuilder().addComponents(select);
         await interaction.reply({ content: "👤 **Bot Management Console**", components: [row], ephemeral: true });
@@ -612,6 +600,40 @@ client.on('interactionCreate', async interaction => {
             if (quest.guide_links && quest.guide_links.length > 0) embed.addFields({ name: '📖 Guides', value: quest.guide_links.map(l => `[${l.label}](${l.url})`).join('\n') });
             await interaction.editReply({ embeds: [embed] });
         } catch (e) { await interaction.editReply("❌ An error occurred while fetching quest details."); }
+    }
+});
+
+// --- MODMAIL / DM HANDLING ---
+client.on('messageCreate', async message => {
+    if (message.author.bot) return;
+
+    // Handle Direct Messages (User replying to the bot)
+    if (!message.guild) {
+        if (message.author.id === OWNER_ID) return; // Don't forward developer's own DMs
+
+        const dev = await client.users.fetch(OWNER_ID);
+        const forwardEmbed = new EmbedBuilder()
+            .setTitle(`📩 New DM received`)
+            .setAuthor({ name: message.author.tag, iconURL: message.author.displayAvatarURL() })
+            .setDescription(message.content || "*No text content (likely an image or file)*")
+            .addFields({ name: 'User ID', value: `\`${message.author.id}\`` })
+            .setColor(0x3498db)
+            .setTimestamp();
+
+        // Create a reply button for the developer
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`srv_dm_${message.author.id}`) // Reuses existing DM modal logic
+                .setLabel(`Reply to ${message.author.username}`)
+                .setStyle(ButtonStyle.Primary)
+        );
+
+        try {
+            await dev.send({ embeds: [forwardEmbed], components: [row] });
+        } catch (e) {
+            console.error("Failed to forward DM to owner:", e.message);
+        }
+        return;
     }
 });
 
