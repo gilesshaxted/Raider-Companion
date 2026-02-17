@@ -188,15 +188,18 @@ async function getOrCreateEventRole(guild, eventName) {
 }
 
 /**
- * Fetches an image from a URL and returns a Buffer for Discord.js
+ * Fetches an image and returns a base64 Data URI. 
+ * This is the format required by Discord for Scheduled Event cover images.
  */
-async function fetchImageBuffer(url) {
+async function fetchImageAsDataURI(url) {
     if (!url) return null;
     try {
         const response = await axios.get(url, { responseType: 'arraybuffer' });
-        return Buffer.from(response.data);
+        const buffer = Buffer.from(response.data, 'binary');
+        const base64 = buffer.toString('base64');
+        return `data:image/png;base64,${base64}`;
     } catch (err) {
-        console.error(`Failed to fetch image for scheduled event: ${url}`, err.message);
+        console.error(`Failed to fetch image for data URI: ${url}`, err.message);
         return null;
     }
 }
@@ -249,23 +252,32 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 config.activeAlerts = freshAlerts;
             }
 
-            // 2. DISCORD SCHEDULED EVENTS SYNC
+            // 2. DISCORD SCHEDULED EVENTS SYNC & DUPLICATE REMOVAL
             let existingScheduledEvents = [];
             try {
-                // Explicitly fetch all scheduled and active events
                 existingScheduledEvents = await guild.scheduledEvents.fetch();
             } catch (e) { console.error("Could not fetch scheduled events:", e.message); }
+
+            // --- DUPLICATE PURGE ---
+            // If there are multiple Discord events for the same map/time/name, delete extras.
+            const seenKeys = new Set();
+            for (const se of existingScheduledEvents.values()) {
+                const key = `${se.scheduledStartTimestamp}_${se.entityMetadata?.location}_${se.name.toLowerCase()}`;
+                if (seenKeys.has(key)) {
+                    console.log(`Deleting duplicate native event: ${se.name}`);
+                    try { await se.delete(); } catch (e) {}
+                } else {
+                    seenKeys.add(key);
+                }
+            }
 
             const scorableEvents = events.filter(e => e.startTime > now && e.startTime <= scheduleWindow);
             
             for (const e of scorableEvents) {
-                // FIXED: More robust duplicate detection
-                // We check the specific location metadata AND ensure the name matches
                 const alreadyScheduled = existingScheduledEvents.some(se => {
                     const sameLocation = se.entityMetadata?.location === e.map;
-                    const nameContainsEvent = se.name.toLowerCase().includes(e.name.toLowerCase());
-                    const sameTimeWindow = Math.abs(se.scheduledStartTimestamp - e.startTime) < 120000; // 2 minute leeway
-                    return sameLocation && nameContainsEvent && sameTimeWindow;
+                    const sameTimeWindow = Math.abs(se.scheduledStartTimestamp - e.startTime) < 120000;
+                    return sameLocation && sameTimeWindow;
                 });
 
                 if (!alreadyScheduled) {
@@ -275,7 +287,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                         );
                         
                         const mapImage = mapKey ? mapConfigs[mapKey].image : null;
-                        const imageBuffer = await fetchImageBuffer(mapImage);
+                        const dataURI = await fetchImageAsDataURI(mapImage);
 
                         await guild.scheduledEvents.create({
                             name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
@@ -284,11 +296,12 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                             privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
                             entityType: GuildScheduledEventEntityType.External,
                             entityMetadata: { location: e.map },
-                            image: imageBuffer, 
+                            image: dataURI, // Use Data URI for cover
                             description: `Upcoming in-game event rotation on ${e.map}. Be ready Raiders!`
                         });
+                        console.log(`Created event for ${e.name} with cover.`);
                     } catch (err) {
-                        console.error(`Failed to create scheduled event for ${e.name} on ${e.map}:`, err.message);
+                        console.error(`Failed to create scheduled event for ${e.name}:`, err.message);
                     }
                 }
 
