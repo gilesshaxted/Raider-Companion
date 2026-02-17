@@ -113,13 +113,13 @@ const client = new Client({
         GatewayIntentBits.GuildScheduledEvents,
         GatewayIntentBits.GuildMessageReactions,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.DirectMessages // REQUIRED: To see incoming DMs
+        GatewayIntentBits.DirectMessages 
     ],
     partials: [
         Partials.Message, 
         Partials.Reaction, 
         Partials.User,
-        Partials.Channel // REQUIRED: To receive DMs from people bot isn't currently tracking
+        Partials.Channel 
     ]
 });
 
@@ -473,7 +473,6 @@ client.on('interactionCreate', async interaction => {
         }
         
         if (action === 'dm') {
-            // targetId here is the User ID of the owner
             const modal = new ModalBuilder().setCustomId(`srv_modal_dm_${targetId}`).setTitle('Message User');
             const input = new TextInputBuilder().setCustomId('dm_text').setLabel('Message content').setStyle(TextInputStyle.Paragraph).setRequired(true);
             modal.addComponents(new ActionRowBuilder().addComponents(input));
@@ -607,9 +606,14 @@ client.on('interactionCreate', async interaction => {
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
-    // Handle Direct Messages (User replying to the bot)
     if (!message.guild) {
-        if (message.author.id === OWNER_ID) return; // Don't forward developer's own DMs
+        // If the developer sends a DM, let's give a simple self-test response
+        if (message.author.id === OWNER_ID) {
+            if (message.content.toLowerCase() === 'ping') {
+                return message.reply('Pong! Developer Mode is active.');
+            }
+            return; // Ignore other dev messages to avoid loops
+        }
 
         const dev = await client.users.fetch(OWNER_ID);
         const forwardEmbed = new EmbedBuilder()
@@ -620,16 +624,17 @@ client.on('messageCreate', async message => {
             .setColor(0x3498db)
             .setTimestamp();
 
-        // Create a reply button for the developer
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
-                .setCustomId(`srv_dm_${message.author.id}`) // Reuses existing DM modal logic
+                .setCustomId(`srv_dm_${message.author.id}`) 
                 .setLabel(`Reply to ${message.author.username}`)
                 .setStyle(ButtonStyle.Primary)
         );
 
         try {
             await dev.send({ embeds: [forwardEmbed], components: [row] });
+            // Send confirmation to the user
+            await message.reply("✅ Your message has been sent to the bot developer. They will get back to you if a response is needed.");
         } catch (e) {
             console.error("Failed to forward DM to owner:", e.message);
         }
