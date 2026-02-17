@@ -661,7 +661,7 @@ client.on('messageCreate', async message => {
 
 client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    client.user.setActivity('you loot', { type: ActivityType.Watching });
+    client.user.setActivity('Data from Metaforge', { type: ActivityType.Watching });
     await loadAllConfigs();
     await refreshCaches();
     
