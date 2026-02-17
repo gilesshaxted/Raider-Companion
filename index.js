@@ -14,7 +14,12 @@ const {
     GuildScheduledEventEntityType,
     ActivityType,
     Partials,
-    AttachmentBuilder 
+    AttachmentBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    ModalBuilder,
+    TextInputBuilder,
+    TextInputStyle
 } = require('discord.js');
 const axios = require('axios');
 const http = require('http');
@@ -23,7 +28,7 @@ const path = require('path');
 
 // --- FIREBASE WEB SDK SETUP ---
 const { initializeApp } = require('firebase/app');
-const { getFirestore, doc, getDoc, setDoc, collection, getDocs } = require('firebase/firestore');
+const { getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc } = require('firebase/firestore');
 const { getAuth, signInAnonymously } = require('firebase/auth');
 
 const firebaseConfig = {
@@ -39,6 +44,7 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const auth = getAuth(app);
 const appId = 'raider-companion';
+const OWNER_ID = '444211741774184458';
 
 // --- CONFIGURATION VALIDATION ---
 const requiredEnvVars = [
@@ -77,7 +83,7 @@ const QUESTS_API_URL = 'https://metaforge.app/api/arc-raiders/quests';
 const CHECK_INTERVAL = 60000;
 
 let guildConfigs = new Map();
-let activeGuildUpdates = new Set(); // NEW: Prevents parallel updates on the same guild
+let activeGuildUpdates = new Set(); 
 
 const mapConfigs = {
     'Dam': { color: 0x3498db, fileName: 'dam_battlegrounds.png' },
@@ -105,7 +111,8 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildScheduledEvents,
-        GatewayIntentBits.GuildMessageReactions 
+        GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.GuildMembers // Required to fetch guild owners for management
     ],
     partials: [Partials.Message, Partials.Reaction, Partials.User]
 });
@@ -157,6 +164,27 @@ async function loadAllConfigs() {
     } catch (e) { console.error("Error loading configs:", e.message); }
 }
 
+// --- BLACKLIST HELPERS ---
+async function isGuildBlacklisted(guildId) {
+    if (!await ensureAuth()) return false;
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'blacklist', guildId);
+    const snap = await getDoc(docRef);
+    return snap.exists();
+}
+
+async function blacklistGuild(guildId) {
+    if (!await ensureAuth()) return;
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'blacklist', guildId);
+    await setDoc(docRef, { blacklisted_at: Date.now() });
+}
+
+async function unblacklistGuild(guildId) {
+    if (!await ensureAuth()) return;
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'blacklist', guildId);
+    await deleteDoc(docRef);
+}
+
+// --- DATA CACHING ---
 async function refreshCaches() {
     try {
         const [arcRes, itemRes, traderRes, questRes] = await Promise.all([
@@ -207,8 +235,6 @@ function getLocalImageAsDataURI(fileName) {
 
 // --- BOT LOGIC ---
 async function updateEvents(targetGuildId = null, forceNewMessages = false) {
-    // 1. GLOBAL LOCK LOGIC
-    // If background loop is running, manual command must wait to prevent cross-contamination.
     if (!targetGuildId) {
         if (isGlobalUpdating) return;
         isGlobalUpdating = true;
@@ -229,8 +255,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
 
         for (const [guildId, config] of guildsToUpdate) {
             if (!config || !config.channelId) continue;
-            
-            // PER-GUILD LOCK: Prevents multiple operations on the same guild data
             if (activeGuildUpdates.has(guildId)) continue;
             activeGuildUpdates.add(guildId);
 
@@ -238,10 +262,8 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 let channel;
                 try { channel = await client.channels.fetch(config.channelId); } catch (err) { continue; }
                 if (!channel) continue;
-
                 const guild = channel.guild;
 
-                // 1. Cleanup expired alerts
                 if (config.activeAlerts && config.activeAlerts.length > 0) {
                     const freshAlerts = [];
                     for (const alert of config.activeAlerts) {
@@ -252,7 +274,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     config.activeAlerts = freshAlerts;
                 }
 
-                // 2. Scheduled Events Cleanup & Creation
                 let existingScheduledEvents = [];
                 try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
 
@@ -276,7 +297,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                         try {
                             const mapKey = Object.keys(mapConfigs).find(k => k.toLowerCase().replace(/\s/g, '') === e.map?.toLowerCase().replace(/\s/g, ''));
                             const dataURI = mapKey ? getLocalImageAsDataURI(mapConfigs[mapKey].fileName) : null;
-
                             await guild.scheduledEvents.create({
                                 name: `${getEmoji(e.name)} ${e.name} (${e.map})`,
                                 scheduledStartTime: new Date(e.startTime),
@@ -306,7 +326,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     }
                 }
 
-                // 4. Map Embeds
                 if (forceNewMessages) {
                     for (const key in config.messageIds) {
                         if (config.messageIds[key]) {
@@ -320,51 +339,30 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     const mapEvents = events.filter(e => e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, ''));
                     const activeEvent = mapEvents.find(e => e.startTime <= now && e.endTime > now);
                     const upcoming = mapEvents.filter(e => e.startTime > now).sort((a, b) => a.startTime - b.startTime).slice(0, 3);
-
                     const imagePath = path.join(__dirname, 'assets', mapSet.fileName);
                     const file = fs.existsSync(imagePath) ? new AttachmentBuilder(imagePath) : null;
-
-                    const embed = new EmbedBuilder()
-                        .setTitle(`📍 ${mapName}`).setColor(mapSet.color)
-                        .setTimestamp().setFooter({ text: `metaforge.app/arc-raiders` });
-
-                    if (file) { embed.setImage(`attachment://${mapSet.fileName}`); }
-
+                    const embed = new EmbedBuilder().setTitle(`📍 ${mapName}`).setColor(mapSet.color).setTimestamp().setFooter({ text: `metaforge.app/arc-raiders` });
+                    if (file) embed.setImage(`attachment://${mapSet.fileName}`);
                     if (activeEvent) {
                         embed.addFields({ name: '📡 Status', value: `🟢 **LIVE:** ${getEmoji(activeEvent.name)} **${activeEvent.name}**\nEnds <t:${Math.floor(activeEvent.endTime / 1000)}:R>` });
                         if (activeEvent.icon) embed.setThumbnail(activeEvent.icon);
                     } else { embed.addFields({ name: '📡 Status', value: '⚪ **Offline**' }); }
-
-                    upcoming.forEach((e, i) => {
-                        embed.addFields({ name: `Next Up #${i + 1}`, value: `${getEmoji(e.name)} **${e.name}**\n<t:${Math.floor(e.startTime / 1000)}:R>`, inline: true });
-                    });
-                    
+                    upcoming.forEach((e, i) => { embed.addFields({ name: `Next Up #${i + 1}`, value: `${getEmoji(e.name)} **${e.name}**\n<t:${Math.floor(e.startTime / 1000)}:R>`, inline: true }); });
                     await syncMessageWithFile(channel, config, mapName, embed, file);
                 }
 
                 const current = events.filter(e => e.startTime <= now && e.endTime > now);
-                const summary = new EmbedBuilder()
-                    .setTitle('🛸 ARC Raiders - Live Summary').setColor(0x00AE86)
-                    .setDescription('React to this message with an emoji below to get the notification role!')
-                    .setFooter({ text: `Data provided by metaforge.app/arc-raiders` }).setTimestamp();
-
-                if (current.length > 0) {
-                    summary.addFields({ name: '✅ Currently Active', value: current.map(e => `${getEmoji(e.name)} **${e.name}**\n└ *${e.map}*\n────────────────`).join('\n') });
-                } else { summary.addFields({ name: '✅ Currently Active', value: 'No events currently active.' }); }
-
+                const summary = new EmbedBuilder().setTitle('🛸 ARC Raiders - Live Summary').setColor(0x00AE86).setDescription('React to this message with an emoji below to get the notification role!').setFooter({ text: `Data provided by metaforge.app/arc-raiders` }).setTimestamp();
+                if (current.length > 0) summary.addFields({ name: '✅ Currently Active', value: current.map(e => `${getEmoji(e.name)} **${e.name}**\n└ *${e.map}*\n────────────────`).join('\n') });
+                else summary.addFields({ name: '✅ Currently Active', value: 'No events currently active.' });
                 const summarySent = await syncMessage(channel, config, 'Summary', summary);
                 if (summarySent && forceNewMessages) {
                     for (const emoji of Object.values(eventEmojis)) { try { await summarySent.react(emoji); } catch (e) {} }
                 }
                 await saveGuildConfig(guildId);
-
-            } finally {
-                activeGuildUpdates.delete(guildId); // Release lock for this guild
-            }
+            } finally { activeGuildUpdates.delete(guildId); }
         }
-    } catch (error) { console.error('Update loop error:', error.message); } finally { 
-        if (!targetGuildId) isGlobalUpdating = false; 
-    }
+    } catch (error) { console.error('Update loop error:', error.message); } finally { if (!targetGuildId) isGlobalUpdating = false; }
 }
 
 async function syncMessage(channel, config, key, embed) {
@@ -377,32 +375,25 @@ async function syncMessage(channel, config, key, embed) {
 async function syncMessageWithFile(channel, config, key, embed, file) {
     const files = file ? [file] : [];
     if (config.messageIds[key]) {
-        try {
-            const msg = await channel.messages.fetch(config.messageIds[key]);
-            return await msg.edit({ embeds: [embed], files });
-        } catch (e) {
-            const sent = await channel.send({ embeds: [embed], files });
-            config.messageIds[key] = sent.id;
-            return sent;
-        }
-    } else {
-        const sent = await channel.send({ embeds: [embed], files });
-        config.messageIds[key] = sent.id;
-        return sent;
-    }
+        try { const msg = await channel.messages.fetch(config.messageIds[key]); return await msg.edit({ embeds: [embed], files }); } 
+        catch (e) { const sent = await channel.send({ embeds: [embed], files }); config.messageIds[key] = sent.id; return sent; }
+    } else { const sent = await channel.send({ embeds: [embed], files }); config.messageIds[key] = sent.id; return sent; }
 }
 
 function buildTraderItemEmbed(item) {
     return new EmbedBuilder().setTitle(`📦 Trader Item: ${item.name}`).setDescription(item.description || "No description provided.").setColor(rarityColors[item.rarity] || 0x5865F2).setThumbnail(item.icon).addFields({ name: 'Seller', value: `👤 ${item.traderName}`, inline: true }, { name: 'Trader Price', value: `🪙 ${item.trader_price.toLocaleString()}`, inline: true }, { name: 'Base Value', value: `🪙 ${item.value.toLocaleString()}`, inline: true }, { name: 'Rarity', value: item.rarity, inline: true }, { name: 'Category', value: item.item_type, inline: true }).setTimestamp();
 }
 
+// --- COMMAND DATA ---
 const commandsData = [
     new SlashCommandBuilder().setName('setup').setDescription('Set the channel for live event updates').addChannelOption(option => option.setName('channel').setDescription('The channel to post in').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
     new SlashCommandBuilder().setName('update').setDescription('Force a manual update of the live event embeds in this guild').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
     new SlashCommandBuilder().setName('arc').setDescription('Get intelligence on a specific ARC unit').addStringOption(option => option.setName('unit').setDescription('Pick an ARC unit').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('item').setDescription('Lookup an item, weapon, or material').addStringOption(option => option.setName('name').setDescription('Search for an item').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('traders').setDescription('View trader inventories or find where an item is sold').addStringOption(option => option.setName('name').setDescription('Search for a Trader or Category (e.g. Weapon)').setRequired(true).setAutocomplete(true)).toJSON(),
-    new SlashCommandBuilder().setName('quests').setDescription('View detailed objectives and rewards for ARC Raiders quests').addStringOption(option => option.setName('name').setDescription('Search for a quest name').setRequired(true).setAutocomplete(true)).toJSON()
+    new SlashCommandBuilder().setName('quests').setDescription('View detailed objectives and rewards for ARC Raiders quests').addStringOption(option => option.setName('name').setDescription('Search for a quest name').setRequired(true).setAutocomplete(true)).toJSON(),
+    // NEW: Owner-only management command
+    new SlashCommandBuilder().setName('servers').setDescription('Manage servers the bot is in (Owner Only)').toJSON()
 ];
 
 async function handleReaction(reaction, user, add = true) {
@@ -416,10 +407,11 @@ async function handleReaction(reaction, user, add = true) {
     const guild = reaction.message.guild;
     const member = await guild.members.fetch(user.id);
     const role = await getOrCreateEventRole(guild, eventName);
-    if (role) { if (add) { await member.roles.add(role); } else { await member.roles.remove(role); } }
+    if (role) { if (add) { await member.roles.add(role).catch(() => {}); } else { await member.roles.remove(role).catch(() => {}); } }
 }
 
 client.on('interactionCreate', async interaction => {
+    // 1. Autocomplete
     if (interaction.isAutocomplete()) {
         const focusedValue = interaction.options.getFocused().toLowerCase();
         if (interaction.commandName === 'arc') { const choices = arcCache.filter(arc => arc.name.toLowerCase().includes(focusedValue)); await interaction.respond(choices.slice(0, 25).map(arc => ({ name: arc.name, value: arc.id }))); }
@@ -433,15 +425,112 @@ client.on('interactionCreate', async interaction => {
         if (interaction.commandName === 'quests') { const choices = questCache.filter(q => q.name.toLowerCase().includes(focusedValue)); await interaction.respond(choices.slice(0, 25).map(q => ({ name: q.name, value: q.id }))); }
         return;
     }
+
+    // 2. Select Menus
     if (interaction.isStringSelectMenu()) {
         if (interaction.customId === 'trader_item_select') {
             const itemId = interaction.values[0];
             const item = traderItemsFlat.find(i => i.id === itemId);
             if (item) { await interaction.reply({ embeds: [buildTraderItemEmbed(item)], ephemeral: true }); }
         }
+        
+        // NEW: Server Management Selection
+        if (interaction.customId === 'server_mgmt_select') {
+            if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "Unauthorized.", ephemeral: true });
+            const guildId = interaction.values[0];
+            const guild = await client.guilds.fetch(guildId).catch(() => null);
+            if (!guild) return interaction.reply({ content: "Server no longer accessible.", ephemeral: true });
+
+            const owner = await guild.fetchOwner();
+            const embed = new EmbedBuilder()
+                .setTitle(`🏠 Server Details: ${guild.name}`)
+                .setColor(0x5865F2)
+                .setThumbnail(guild.iconURL())
+                .addFields(
+                    { name: 'ID', value: `\`${guild.id}\``, inline: true },
+                    { name: 'Owner', value: `${owner.user.tag} (\`${owner.id}\`)`, inline: true },
+                    { name: 'Members', value: guild.memberCount.toString(), inline: true },
+                    { name: 'Age', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:R>`, inline: true }
+                );
+
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Create Invite').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId(`srv_dm_${guild.id}`).setLabel('DM Owner').setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave Server').setStyle(ButtonStyle.Danger),
+                new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block/Blacklist').setStyle(ButtonStyle.Danger)
+            );
+
+            await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+        }
         return;
     }
+
+    // 3. Buttons
+    if (interaction.isButton()) {
+        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "Unauthorized.", ephemeral: true });
+        const [prefix, action, targetId] = interaction.customId.split('_');
+        if (prefix !== 'srv') return;
+
+        const guild = await client.guilds.fetch(targetId).catch(() => null);
+        if (!guild && action !== 'unblock') return interaction.reply({ content: "Server not found.", ephemeral: true });
+
+        if (action === 'invite') {
+            const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(client.user).has('CreateInstantInvite'));
+            if (!channel) return interaction.reply({ content: "No permission to create invites.", ephemeral: true });
+            const invite = await channel.createInvite({ maxAge: 0, maxUses: 1 });
+            await interaction.reply({ content: `🔗 Invite created: ${invite.url}`, ephemeral: true });
+        }
+        
+        if (action === 'dm') {
+            const modal = new ModalBuilder().setCustomId(`srv_modal_dm_${targetId}`).setTitle('Message Owner');
+            const input = new TextInputBuilder().setCustomId('dm_text').setLabel('Message content').setStyle(TextInputStyle.Paragraph).setRequired(true);
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+            await interaction.showModal(modal);
+        }
+
+        if (action === 'leave') {
+            await guild.leave();
+            await interaction.reply({ content: `✅ Left server: ${guild.name}`, ephemeral: true });
+        }
+
+        if (action === 'block') {
+            await blacklistGuild(targetId);
+            await guild.leave().catch(() => {});
+            await interaction.reply({ content: `🚫 Server blacklisted and bot has left.`, ephemeral: true });
+        }
+    }
+
+    // 4. Modals
+    if (interaction.isModalSubmit()) {
+        if (interaction.customId.startsWith('srv_modal_dm_')) {
+            const targetGuildId = interaction.customId.replace('srv_modal_dm_', '');
+            const guild = await client.guilds.fetch(targetGuildId);
+            const owner = await guild.fetchOwner();
+            const text = interaction.fields.getTextInputValue('dm_text');
+            
+            try {
+                await owner.send(`**Message from Bot Developer:**\n${text}`);
+                await interaction.reply({ content: `✅ Message sent to ${owner.user.tag}`, ephemeral: true });
+            } catch (e) {
+                await interaction.reply({ content: `❌ Could not DM owner (DMs likely closed).`, ephemeral: true });
+            }
+        }
+    }
+
+    // 5. Chat Commands
     if (!interaction.isChatInputCommand()) return;
+    
+    if (interaction.commandName === 'servers') {
+        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ Access Denied: Developer Only.", ephemeral: true });
+        
+        const guilds = client.guilds.cache.map(g => ({ label: g.name.substring(0, 25), value: g.id, description: `ID: ${g.id} | ${g.memberCount} members` }));
+        if (guilds.length === 0) return interaction.reply({ content: "Bot is not in any servers.", ephemeral: true });
+
+        const select = new StringSelectMenuBuilder().setCustomId('server_mgmt_select').setPlaceholder('Select a server to manage...').addOptions(guilds.slice(0, 25));
+        const row = new ActionRowBuilder().addComponents(select);
+        await interaction.reply({ content: "👤 **Bot Management Console**", components: [row], ephemeral: true });
+    }
+
     if (interaction.commandName === 'setup') {
         const targetChannel = interaction.options.getChannel('channel');
         const guildId = interaction.guildId;
@@ -450,18 +539,21 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: `✅ Events configured for ${targetChannel}.`, ephemeral: true });
         await updateEvents(guildId, true);
     }
+
     if (interaction.commandName === 'update') {
         const guildId = interaction.guildId;
         if (!guildConfigs.has(guildId)) return interaction.reply({ content: "❌ Run `/setup` first!", ephemeral: true });
         await interaction.reply({ content: '🔄 Forcing update...', ephemeral: true });
         await updateEvents(guildId, true);
     }
+
     if (interaction.commandName === 'arc') {
         const arc = arcCache.find(a => a.id === interaction.options.getString('unit'));
         if (!arc) return interaction.reply({ content: "❌ Intelligence not found.", ephemeral: true });
         const embed = new EmbedBuilder().setTitle(`🤖 Intelligence: ${arc.name}`).setDescription(arc.description).setColor(0x5865F2).setThumbnail(arc.icon).setImage(arc.image).setTimestamp();
         await interaction.reply({ embeds: [embed] });
     }
+
     if (interaction.commandName === 'item') {
         const item = itemCache.find(i => i.id === interaction.options.getString('name'));
         if (!item) return interaction.reply({ content: "❌ Item not found.", ephemeral: true });
@@ -474,65 +566,83 @@ client.on('interactionCreate', async interaction => {
         }
         await interaction.reply({ embeds: [embed] });
     }
+
     if (interaction.commandName === 'traders') {
         const selection = interaction.options.getString('name');
         if (selection.startsWith('category:')) {
             const catName = selection.split(':')[1];
             const items = traderItemsFlat.filter(i => i.item_type === catName);
-            if (items.length === 0) return interaction.reply({ content: "❌ No trader items found.", ephemeral: true });
+            if (items.length === 0) return interaction.reply({ content: "❌ No trader items found in this category.", ephemeral: true });
             const list = items.map(i => `• **${i.name}** sold by **${i.traderName}**`).join('\n');
-            const embed = new EmbedBuilder().setTitle(`📁 Category: ${catName}`).setDescription(list).setColor(0x3498db);
-            const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select item...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
+            const embed = new EmbedBuilder().setTitle(`📁 Browsing Category: ${catName}`).setDescription(list).setColor(0x3498db);
+            const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select an item to see details...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
             const row = new ActionRowBuilder().addComponents(select);
             await interaction.reply({ embeds: [embed], components: [row] });
-        } else if (selection.startsWith('trader:')) {
+        }
+        else if (selection.startsWith('trader:')) {
             const traderName = selection.split(':')[1];
             const items = traderCache[traderName];
             if (!items) return interaction.reply({ content: "❌ Trader not found.", ephemeral: true });
-            const inventoryList = items.map(i => `• **${i.name}**\n└ 🪙 ${i.trader_price.toLocaleString()}`).join('\n');
-            const embed = new EmbedBuilder().setTitle(`👤 Trader: ${traderName}`).setDescription(inventoryList || 'Out of stock.').setColor(0x00AE86);
-            const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder(`Select item...`).addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
+            const inventoryList = items.map(i => `• **${i.name}**\n└ 🪙 ${i.trader_price.toLocaleString()} (${i.rarity})`).join('\n');
+            const embed = new EmbedBuilder().setTitle(`👤 Trader Inventory: ${traderName}`).setDescription(inventoryList || 'This trader is currently out of stock.').setColor(0x00AE86);
+            const select = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder(`Select one of ${traderName}'s items...`).addOptions(items.slice(0, 25).map(i => ({ label: i.name, description: `Type: ${i.item_type} | Price: ${i.trader_price}`, value: i.id })));
             const row = new ActionRowBuilder().addComponents(select);
             await interaction.reply({ embeds: [embed], components: [row] });
         } 
     }
+
     if (interaction.commandName === 'quests') {
         const questId = interaction.options.getString('name');
         try {
             await interaction.deferReply();
             const res = await axios.get(`${QUESTS_API_URL}?id=${questId}&page=1`);
             const quest = res.data?.data;
-            if (!quest) return interaction.editReply("❌ Quest data missing.");
+            if (!quest) return interaction.editReply("❌ Quest data could not be retrieved.");
             const embed = new EmbedBuilder().setTitle(`📜 Quest: ${quest.name}`).setColor(0x3498db).setThumbnail(quest.image).setTimestamp();
             if (quest.trader_name) embed.addFields({ name: '👤 Giver', value: quest.trader_name, inline: true });
-            if (quest.xp > 0) embed.addFields({ name: '✨ XP', value: `\`${quest.xp.toLocaleString()}\``, inline: true });
-            if (quest.objectives?.length > 0) embed.addFields({ name: '🎯 Objectives', value: quest.objectives.map(o => `• ${o}`).join('\n') });
+            if (quest.xp > 0) embed.addFields({ name: '✨ XP Reward', value: `\`${quest.xp.toLocaleString()}\``, inline: true });
+            if (quest.objectives && quest.objectives.length > 0) {
+                const objectiveList = quest.objectives.map(o => `• ${o}`).join('\n');
+                embed.addFields({ name: '🎯 Objectives', value: objectiveList });
+            }
             let rewardsText = "";
-            if (quest.granted_items?.length > 0) rewardsText += quest.granted_items.map(r => `✅ **${r.quantity}x** ${r.item.name}`).join('\n') + '\n';
-            if (quest.rewards?.length > 0) rewardsText += quest.rewards.map(r => `🎁 **${r.quantity}x** ${r.item.name}`).join('\n');
+            if (quest.granted_items && quest.granted_items.length > 0) rewardsText += quest.granted_items.map(r => `✅ **${r.quantity}x** ${r.item.name}`).join('\n') + '\n';
+            if (quest.rewards && quest.rewards.length > 0) rewardsText += quest.rewards.map(r => `🎁 **${r.quantity}x** ${r.item.name}`).join('\n');
             if (rewardsText) embed.addFields({ name: '💰 Rewards', value: rewardsText });
-            if (quest.guide_links?.length > 0) embed.addFields({ name: '📖 Guides', value: quest.guide_links.map(l => `[${l.label}](${l.url})`).join('\n') });
+            if (quest.guide_links && quest.guide_links.length > 0) embed.addFields({ name: '📖 Guides', value: quest.guide_links.map(l => `[${l.label}](${l.url})`).join('\n') });
             await interaction.editReply({ embeds: [embed] });
-        } catch (e) { await interaction.editReply("❌ Error fetching quest."); }
+        } catch (e) { await interaction.editReply("❌ An error occurred while fetching quest details."); }
     }
 });
 
-client.on('messageReactionAdd', (reaction, user) => handleReaction(reaction, user, true));
-client.on('messageReactionRemove', (reaction, user) => handleReaction(reaction, user, false));
+// --- REACTION LISTENERS ---
+client.on('messageReactionAdd', async (reaction, user) => handleReaction(reaction, user, true));
+client.on('messageReactionRemove', async (reaction, user) => handleReaction(reaction, user, false));
 
-// REMOVED: messageCreate trigger. Background loop + manual /update is enough.
+// --- SERVER JOIN PROTECTION ---
+client.on('guildCreate', async guild => {
+    const blacklisted = await isGuildBlacklisted(guild.id);
+    if (blacklisted) {
+        console.warn(`🛡️ Security: Auto-leaving blacklisted guild ${guild.name} (${guild.id})`);
+        await guild.leave().catch(() => {});
+    }
+});
 
 client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
     client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
     await loadAllConfigs();
     await refreshCaches();
+    
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
         const guilds = client.guilds.cache;
-        for (const [guildId, guild] of guilds) { try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commandsData }); } catch (err) {} }
+        for (const [guildId, guild] of guilds) {
+            try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commandsData }); } catch (err) {}
+        }
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
     } catch (e) {}
+
     updateEvents();
     setInterval(updateEvents, CHECK_INTERVAL);
 });
