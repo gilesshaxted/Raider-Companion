@@ -648,7 +648,7 @@ client.on('messageCreate', async message => {
 
 client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
+    client.user.setActivity('you loot', { type: ActivityType.Watching });
     await loadAllConfigs();
     await refreshCaches();
     
