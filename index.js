@@ -23,7 +23,27 @@ const { initializeApp } = require('firebase/app');
 const { getFirestore, doc, getDoc, setDoc, collection, getDocs } = require('firebase/firestore');
 const { getAuth, signInAnonymously } = require('firebase/auth');
 
-// Configuration now pulled from Environment Variables for security
+// --- CONFIGURATION VALIDATION ---
+// This ensures the bot doesn't crash with "invalid-api-key" if env vars are missing
+const requiredEnvVars = [
+    'FIREBASE_API_KEY',
+    'FIREBASE_AUTH_DOMAIN',
+    'FIREBASE_PROJECT_ID',
+    'FIREBASE_STORAGE_BUCKET',
+    'FIREBASE_MESSAGING_SENDER_ID',
+    'FIREBASE_APP_ID',
+    'DISCORD_TOKEN',
+    'CLIENT_ID'
+];
+
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+    console.error('❌ CRITICAL ERROR: Missing required Environment Variables:');
+    missingVars.forEach(v => console.error(`   - ${v}`));
+    console.error('\nPlease ensure these are set in your .env file or Koyeb Secrets dashboard.');
+    process.exit(1); // Stop the bot before it crashes with a cryptic Firebase error
+}
+
 const firebaseConfig = {
     apiKey: process.env.FIREBASE_API_KEY,
     authDomain: process.env.FIREBASE_AUTH_DOMAIN,
@@ -638,7 +658,6 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-// --- REACTION LISTENERS ---
 client.on('messageReactionAdd', async (reaction, user) => handleReaction(reaction, user, true));
 client.on('messageReactionRemove', async (reaction, user) => handleReaction(reaction, user, false));
 
@@ -668,5 +687,4 @@ client.once(Events.ClientReady, async () => {
     updateEvents();
     setInterval(updateEvents, CHECK_INTERVAL);
 });
-
 client.login(TOKEN);
