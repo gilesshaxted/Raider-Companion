@@ -8,7 +8,7 @@ const {
     SlashCommandBuilder, 
     PermissionFlagsBits,
     Events,
-    ActionRowBuilder,
+    ActionRowBuilder, 
     StringSelectMenuBuilder,
     GuildScheduledEventPrivacyLevel,
     GuildScheduledEventEntityType,
@@ -444,7 +444,7 @@ client.on('interactionCreate', async interaction => {
             const subId = `${map}_${event}`.toLowerCase().replace(/\s/g, '_');
             await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: interaction.values, created_at: Date.now() });
             await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
-            await interaction.update({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
+            await interaction.update({ content: `✅ **Active!** DMs set for ${event} on ${map}.`, components: [] });
         }
         if (interaction.customId === 'server_mgmt_select') {
             if (interaction.user.id !== OWNER_ID) return;
@@ -492,10 +492,15 @@ client.on('interactionCreate', async interaction => {
         const subs = await getUserSubscriptions(interaction.user.id);
         const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal DM rotation alerts.');
         if (subs.length > 0) {
-            // FIXED: Prominent display using "[Event Name] on [Map Name]" format
-            const list = subs.map(s => `• ${getEmoji(s.event)} **${s.event}** on **${s.map}**\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === o)?.label).join(', ')}`).join('\n\n');
+            // FIXED: Updated format to multi-line [event] on [map] and removed bolding
+            const list = subs.map(s => 
+`• ${getEmoji(s.event)} ${s.event} on ${s.map}
+└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === o)?.label).join(', ')}`
+            ).join('\n\n');
+            
             embed.addFields({ name: 'Active Alerts', value: list });
-            // FIXED: Dropdown labels correctly show "[Event] on [Map]"
+            
+            // FIXED: Dropdown label updated to [event] on [map]
             const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
             await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
         } else {
