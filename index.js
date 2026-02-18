@@ -248,12 +248,6 @@ function getLocalImageAsDataURI(fileName) {
 }
 
 // --- BOT LOGIC ---
-/**
- * updateEvents handles embed refreshing, native event sync, and role pings.
- * @param {string|null} targetGuildId - Specific guild to update
- * @param {boolean} forceNewMessages - Whether to delete and repost map embeds
- * @param {boolean} purgeActivePings - Whether to delete existing role pings (e.g. on restart)
- */
 async function updateEvents(targetGuildId = null, forceNewMessages = false, purgeActivePings = false) {
     if (!targetGuildId) {
         if (isGlobalUpdating) return;
@@ -283,6 +277,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                         if (matchedEvent) {
                             const timeUntil = matchedEvent.startTime - now;
                             for (const offsetMs of sub.offsets) {
+                                const offsetNum = Number(offsetMs);
                                 if (timeUntil <= offsetNum && timeUntil > (offsetNum - 120000)) {
                                     const alertKey = `dm_${userId}_${matchedEvent.map}_${matchedEvent.name}_${matchedEvent.startTime}_${offsetNum}`;
                                     const lockDoc = doc(db, 'artifacts', appId, 'public', 'data', 'sent_alerts', alertKey);
@@ -310,29 +305,19 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                 if (!channel) continue;
                 const guild = channel.guild;
 
-                // 1. CLEANUP ROLE PINGS (Expired or Forced)
+                // 1. CLEANUP ROLE PINGS
                 if (config.activeAlerts && config.activeAlerts.length > 0) {
                     const freshAlerts = [];
                     for (const alert of config.activeAlerts) {
-                        // Delete if expired OR if we are doing a forced restart cleanup
                         if (now >= alert.startTime || purgeActivePings) {
-                            try { 
-                                const msg = await channel.messages.fetch(alert.messageId); 
-                                await msg.delete(); 
-                            } catch (err) {}
-                            
-                            // If forced cleanup, remove the key so it gets repinged immediately below
-                            if (purgeActivePings) {
-                                config.alertedEventKeys = config.alertedEventKeys.filter(k => !k.includes(String(alert.startTime)));
-                            }
-                        } else {
-                            freshAlerts.push(alert);
-                        }
+                            try { const msg = await channel.messages.fetch(alert.messageId); await msg.delete(); } catch (err) {}
+                            if (purgeActivePings) config.alertedEventKeys = config.alertedEventKeys.filter(k => !k.includes(String(alert.startTime)));
+                        } else freshAlerts.push(alert);
                     }
                     config.activeAlerts = freshAlerts;
                 }
 
-                // 2. DISCORD SCHEDULED EVENTS: GROUPED LOGIC
+                // 2. DISCORD SCHEDULED EVENTS SYNC
                 let existingScheduledEvents = [];
                 try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
                 const seenSlots = new Set();
@@ -362,26 +347,12 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                     else {
                         try { await guild.scheduledEvents.create({ name: finalName, scheduledStartTime: new Date(first.startTime), scheduledEndTime: new Date(Math.max(...group.map(ev => ev.endTime))), privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly, entityType: GuildScheduledEventEntityType.External, entityMetadata: { location: first.map }, image: dataURI, description: finalDesc }); } catch (err) {}
                     }
-                    
-                    // --- ROLE PING REPOST LOGIC ---
-                    for (const e of group) {
-                        const alertKey = `${e.name}_${e.map}_${e.startTime}`;
-                        if (e.startTime <= alertWindow && !config.alertedEventKeys.includes(alertKey)) {
-                            const role = await getOrCreateEventRole(guild, e.name);
-                            const roleMention = role ? `<@&${role.id}>` : `**${e.name}**`;
-                            const alertSent = await channel.send({ content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!` });
-                            config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
-                            config.alertedEventKeys.push(alertKey);
-                            if (config.alertedEventKeys.length > 100) config.alertedEventKeys = config.alertedEventKeys.slice(-100);
-                        }
-                    }
                 }
 
-                // 4. MAP EMBEDS & SUMMARY
+                // 3. MAP EMBEDS
                 if (forceNewMessages) {
                     for (const key in config.messageIds) { if (config.messageIds[key]) { try { const m = await channel.messages.fetch(config.messageIds[key]); await m.delete(); } catch (e) {} config.messageIds[key] = null; } }
                 }
-
                 for (const [mapName, mapSet] of Object.entries(mapConfigs)) {
                     const mapEvents = events.filter(e => e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, ''));
                     const activeEvents = mapEvents.filter(e => e.startTime <= now && e.endTime > now);
@@ -398,12 +369,29 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                     await syncMessageWithFile(channel, config, mapName, embed, file);
                 }
 
-                const current = events.filter(e => e.startTime <= now && e.endTime > now);
+                // 4. SUMMARY
                 const summary = new EmbedBuilder().setTitle('🛸 ARC Raiders - Live Summary').setColor(0x00AE86).setDescription('React with an emoji below to get notification roles!').setFooter({ text: `Data: metaforge.app/arc-raiders` }).setTimestamp();
+                const current = events.filter(e => e.startTime <= now && e.endTime > now);
                 if (current.length > 0) summary.addFields({ name: '✅ Active', value: current.map(e => `${getEmoji(e.name)} **${e.name}** (${e.map})`).join('\n') });
                 else summary.addFields({ name: '✅ Active', value: 'None.' });
                 const summarySent = await syncMessage(channel, config, 'Summary', summary);
                 if (summarySent && forceNewMessages) { for (const emoji of Object.values(eventEmojis)) { try { await summarySent.react(emoji); } catch (e) {} } }
+
+                // 5. ROLE PINGS (SENT LAST)
+                for (const groupKey in groupedEvents) {
+                    const group = groupedEvents[groupKey];
+                    for (const e of group) {
+                        const alertKey = `${e.name}_${e.map}_${e.startTime}`;
+                        if (e.startTime <= alertWindow && !config.alertedEventKeys.includes(alertKey)) {
+                            const role = await getOrCreateEventRole(guild, e.name);
+                            const roleMention = role ? `<@&${role.id}>` : `**${e.name}**`;
+                            const alertSent = await channel.send({ content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!` });
+                            config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
+                            config.alertedEventKeys.push(alertKey);
+                            if (config.alertedEventKeys.length > 100) config.alertedEventKeys = config.alertedEventKeys.slice(-100);
+                        }
+                    }
+                }
                 await saveGuildConfig(guildId);
             } finally { activeGuildUpdates.delete(guildId); }
         }
@@ -425,59 +413,114 @@ function buildTraderItemEmbed(item) {
     return new EmbedBuilder().setTitle(`📦 Item: ${item.name}`).setDescription(item.description || "No info.").setColor(rarityColors[item.rarity] || 0x5865F2).setThumbnail(item.icon).addFields({ name: 'Trader Price', value: `🪙 ${item.trader_price.toLocaleString()}`, inline: true }, { name: 'Category', value: item.item_type, inline: true }).setTimestamp();
 }
 
+// --- PAGINATED HELP DATA ---
+const helpPages = [
+    {
+        title: "🛸 Raider Companion - Overview",
+        description: "Welcome Raider! I provide real-time intelligence for **ARC Raiders** operations. Stay informed about event rotations, item data, and trader inventories.",
+        fields: [
+            { name: "🤖 intelligence", value: "`/arc [unit]` - Technical data on ARC units.\n`/item [name]` - Search for weapons, materials, and stats.\n`/traders [name]` - View current inventory and pricing.\n`/quests [name]` - Mission objectives and rewards." },
+            { name: "📜 Tips", value: "Use the **Live Summary** in your tracking channel to react for notification roles!" }
+        ]
+    },
+    {
+        title: "🔔 Personal Alerts (DMs)",
+        description: "Never miss a rotation again. You can configure personal DM notifications for specific events.",
+        fields: [
+            { name: "Commands", value: "`/subscribe` - Manage your personal alerts.\n`/test-dm` - (Developer Only) Diagnostic check for your schedule." },
+            { name: "How it works", value: "1. Run `/subscribe`.\n2. Pick a Map and a Rotation type.\n3. Select lead times (e.g. 1 hour and 15 mins).\n4. I will DM you exactly at those times before the event starts!" }
+        ]
+    },
+    {
+        title: "🛠️ Server Administration",
+        description: "Tools for Discord staff to manage raider companion within their server.",
+        fields: [
+            { name: "Setup", value: "`/setup [channel]` - Designate a tactical channel where I will post live map guides and rotation pings." },
+            { name: "Maintenance", value: "`/update` - Forces a full purge and repost of all intel embeds and notification pings to ensure everything is current." }
+        ]
+    },
+    {
+        title: "🔗 Sources & Attribution",
+        description: "Intelligence data is provided by the **Metaforge** database.",
+        fields: [
+            { name: "Database", value: "[metaforge.app/arc-raiders](https://metaforge.app/arc-raiders)" },
+            { name: "Support", value: "If you have issues with notifications, ensure your DMs are open and try running `/subscribe` to refresh your profile." }
+        ]
+    }
+];
+
+function generateHelpEmbed(pageIndex) {
+    const data = helpPages[pageIndex];
+    const embed = new EmbedBuilder()
+        .setTitle(data.title)
+        .setDescription(data.description)
+        .setColor(0x5865F2)
+        .setFooter({ text: `Page ${pageIndex + 1} of ${helpPages.length}` })
+        .setTimestamp();
+    if (data.fields) embed.addFields(data.fields);
+    return embed;
+}
+
+function generateHelpComponents(pageIndex) {
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`help_prev_${pageIndex}`)
+            .setLabel('Previous')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(pageIndex === 0),
+        new ButtonBuilder()
+            .setCustomId(`help_next_${pageIndex}`)
+            .setLabel('Next')
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(pageIndex === helpPages.length - 1)
+    );
+    return [row];
+}
+
 const commandsData = [
-    new SlashCommandBuilder().setName('setup').setDescription('Configure update channel').addChannelOption(option => option.setName('channel').setDescription('Channel').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
-    new SlashCommandBuilder().setName('update').setDescription('Force a clean refresh of all embeds and pings').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
-    new SlashCommandBuilder().setName('arc').setDescription('ARC Intel').addStringOption(option => option.setName('unit').setDescription('Unit').setRequired(true).setAutocomplete(true)).toJSON(),
-    new SlashCommandBuilder().setName('item').setDescription('Item Search').addStringOption(option => option.setName('name').setDescription('Item').setRequired(true).setAutocomplete(true)).toJSON(),
-    new SlashCommandBuilder().setName('traders').setDescription('Trader Inventories').addStringOption(option => option.setName('name').setDescription('Trader/Category').setRequired(true).setAutocomplete(true)).toJSON(),
-    new SlashCommandBuilder().setName('quests').setDescription('Quest Logs').addStringOption(option => option.setName('name').setDescription('Quest').setRequired(true).setAutocomplete(true)).toJSON(),
-    new SlashCommandBuilder().setName('servers').setDescription('Admin Console').toJSON(),
-    new SlashCommandBuilder().setName('subscribe').setDescription('Personal DM Alerts').toJSON(),
-    new SlashCommandBuilder().setName('test-dm').setDescription('Verify your rotation alerts (Owner Only)').toJSON()
+    new SlashCommandBuilder().setName('setup').setDescription('Configure tactical channel').addChannelOption(o => o.setName('channel').setDescription('Channel').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
+    new SlashCommandBuilder().setName('update').setDescription('Force refresh all embeds/pings').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
+    new SlashCommandBuilder().setName('arc').setDescription('ARC Intel').addStringOption(o => o.setName('unit').setDescription('Unit').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('item').setDescription('Item Search').addStringOption(o => o.setName('name').setDescription('Item').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('traders').setDescription('Trader Inventories').addStringOption(o => o.setName('name').setDescription('Trader/Category').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('quests').setDescription('Quest Logs').addStringOption(o => o.setName('name').setDescription('Quest').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('subscribe').setDescription('Manage personal DM Alerts').toJSON(),
+    new SlashCommandBuilder().setName('test-dm').setDescription('Verify alerts (Owner Only)').toJSON(),
+    new SlashCommandBuilder().setName('help').setDescription('View guide on how to use Raider Companion').toJSON()
 ];
 
 client.on('interactionCreate', async interaction => {
     try {
         if (interaction.isAutocomplete()) {
-            const focused = interaction.options.getFocused().toLowerCase();
-            if (interaction.commandName === 'arc') await interaction.respond(arcCache.filter(a => a.name.toLowerCase().includes(focused)).slice(0, 25).map(a => ({ name: a.name, value: a.id })));
-            if (interaction.commandName === 'item') await interaction.respond(itemCache.filter(i => i.name.toLowerCase().includes(focused)).slice(0, 25).map(i => ({ name: i.name, value: i.id })));
-            if (interaction.commandName === 'traders') {
-                const results = [];
-                Object.keys(traderCache).forEach(n => { if (n.toLowerCase().includes(focused)) results.push({ name: `👤 ${n}`, value: `trader:${n}` }); });
-                await interaction.respond(results.slice(0, 25));
-            }
-            if (interaction.commandName === 'quests') await interaction.respond(questCache.filter(q => q.name.toLowerCase().includes(focused)).slice(0, 25).map(q => ({ name: q.name, value: q.id })));
+            const f = interaction.options.getFocused().toLowerCase();
+            if (interaction.commandName === 'arc') await interaction.respond(arcCache.filter(a => a.name.toLowerCase().includes(f)).slice(0, 25).map(a => ({ name: a.name, value: a.id })));
+            if (interaction.commandName === 'item') await interaction.respond(itemCache.filter(i => i.name.toLowerCase().includes(f)).slice(0, 25).map(i => ({ name: i.name, value: i.id })));
+            if (interaction.commandName === 'traders') await interaction.respond(Object.keys(traderCache).filter(n => n.toLowerCase().includes(f)).slice(0, 25).map(n => ({ name: `👤 ${n}`, value: `trader:${n}` })));
+            if (interaction.commandName === 'quests') await interaction.respond(questCache.filter(q => q.name.toLowerCase().includes(f)).slice(0, 25).map(q => ({ name: q.name, value: q.id })));
             return;
         }
 
         if (interaction.isStringSelectMenu()) {
             if (interaction.customId === 'trader_item_select') {
-                const item = traderItemsFlat.find(i => i.id === interaction.values[0]);
-                if (item) await interaction.reply({ embeds: [buildTraderItemEmbed(item)], flags: [MessageFlags.Ephemeral] });
+                const i = traderItemsFlat.find(it => it.id === interaction.values[0]);
+                if (i) await interaction.reply({ embeds: [buildTraderItemEmbed(i)], flags: [MessageFlags.Ephemeral] });
             }
             if (interaction.customId === 'sub_delete_select') {
                 await deleteDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', interaction.values[0]));
-                await interaction.update({ content: "✅ Subscription deleted.", embeds: [], components: [] });
+                await interaction.update({ content: "✅ Deleted.", embeds: [], components: [] });
             }
             if (interaction.customId === 'sub_create_map') {
-                const map = interaction.values[0];
                 const opts = Object.keys(eventEmojis).map(e => ({ label: e, value: e, emoji: eventEmojis[e] }));
-                const sel = new StringSelectMenuBuilder().setCustomId(`sub_create_event|${map}`).setPlaceholder('Select rotation...').addOptions(opts);
-                await interaction.update({ content: `📍 Map: **${map}**\nSelect rotation:`, components: [new ActionRowBuilder().addComponents(sel)] });
+                await interaction.update({ content: `📍 Map: **${interaction.values[0]}**\nSelect rotation:`, components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`sub_create_event|${interaction.values[0]}`).setPlaceholder('Select...').addOptions(opts))] });
             }
             if (interaction.customId.startsWith('sub_create_event|')) {
                 const map = interaction.customId.split('|')[1];
-                const event = interaction.values[0];
-                const sel = new StringSelectMenuBuilder().setCustomId(`sub_create_times|${map}|${event}`).setPlaceholder('Select lead times...').setMinValues(1).setMaxValues(2).addOptions(notificationTimes);
-                await interaction.update({ content: `📍 Map: **${map}**\n🛸 Rotation: **${event}**\nSelect lead times:`, components: [new ActionRowBuilder().addComponents(sel)] });
+                await interaction.update({ content: `📍 Map: **${map}**\n🛸 Rotation: **${interaction.values[0]}**\nSelect lead times:`, components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`sub_create_times|${map}|${interaction.values[0]}`).setPlaceholder('Select...').setMinValues(1).setMaxValues(2).addOptions(notificationTimes))] });
             }
             if (interaction.customId.startsWith('sub_create_times|')) {
                 const [, map, event] = interaction.customId.split('|');
-                const numericOffsets = interaction.values.map(v => Number(v));
                 const subId = `${map}_${event}`.toLowerCase().replace(/\s/g, '_');
-                await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: numericOffsets, created_at: Date.now() });
+                await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: interaction.values.map(Number), created_at: Date.now() });
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
                 await interaction.update({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
             }
@@ -487,61 +530,61 @@ client.on('interactionCreate', async interaction => {
         if (interaction.isButton()) {
             if (interaction.customId === 'sub_create_start') {
                 const opts = Object.keys(mapConfigs).map(m => ({ label: m, value: m }));
-                const sel = new StringSelectMenuBuilder().setCustomId('sub_create_map').setPlaceholder('Pick map...').addOptions(opts);
-                await interaction.reply({ content: "📝 **New Subscription**\nPick map:", components: [new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
-                return;
+                await interaction.reply({ content: "📝 **New Alert**\nPick map:", components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sub_create_map').setPlaceholder('Pick...').addOptions(opts))], flags: [MessageFlags.Ephemeral] });
             }
+            if (interaction.customId.startsWith('help_')) {
+                const [, action, current] = interaction.customId.split('_');
+                const nextIndex = action === 'next' ? parseInt(current) + 1 : parseInt(current) - 1;
+                await interaction.update({ embeds: [generateHelpEmbed(nextIndex)], components: generateHelpComponents(nextIndex) });
+            }
+            return;
         }
 
         if (!interaction.isChatInputCommand()) return;
 
+        if (interaction.commandName === 'help') {
+            await interaction.reply({ embeds: [generateHelpEmbed(0)], components: generateHelpComponents(0), flags: [MessageFlags.Ephemeral] });
+        }
+
         if (interaction.commandName === 'test-dm') {
-            if (interaction.user.id !== OWNER_ID) {
-                return interaction.reply({ content: "❌ Developer Only.", flags: [MessageFlags.Ephemeral] });
-            }
+            if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ Unauthorized.", flags: [MessageFlags.Ephemeral] });
             await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }).catch(() => {});
             const subs = await getUserSubscriptions(interaction.user.id);
-            if (subs.length === 0) return interaction.editReply({ content: "❌ No subscriptions to test." }).catch(() => {});
-
+            if (subs.length === 0) return interaction.editReply({ content: "❌ No alerts." }).catch(() => {});
             try {
-                const response = await axios.get(API_URL);
-                const events = response.data?.data || [];
+                const res = await axios.get(API_URL);
+                const evs = res.data?.data || [];
                 const now = Date.now();
-                const embed = new EmbedBuilder().setTitle("🧪 Personal Alert System Diagnostic").setColor(0x3498db).setTimestamp();
+                const embed = new EmbedBuilder().setTitle("🧪 Alert Diagnostic").setColor(0x3498db);
                 let desc = `Verification for: **${interaction.user.tag}**.\n\n`;
-                for (const sub of subs) {
-                    const matchedEvent = events.find(e => e.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && e.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && e.startTime > now);
-                    desc += `📡 **Sub:** ${getEmoji(sub.event)} ${sub.event} on ${sub.map}\n`;
-                    if (matchedEvent) {
-                        desc += `└ 🟢 **Found Upcoming:** <t:${Math.floor(matchedEvent.startTime/1000)}:F>\n`;
-                        sub.offsets.forEach(offset => {
-                            const triggerAt = matchedEvent.startTime - Number(offset);
-                            const label = notificationTimes.find(t => t.value === String(offset))?.label || `${offset}ms`;
-                            if (triggerAt > now) desc += `   └ 🔔 **Next Alert (${label}):** <t:${Math.floor(triggerAt/1000)}:f> (<t:${Math.floor(triggerAt/1000)}:R>)\n`;
-                            else desc += `   └ ⚪ **Alert Passed (${label}):** <t:${Math.floor(triggerAt/1000)}:f>\n`;
+                for (const s of subs) {
+                    const m = evs.find(e => e.map?.toLowerCase().trim() === s.map?.toLowerCase().trim() && e.name?.toLowerCase().trim() === s.event?.toLowerCase().trim() && e.startTime > now);
+                    desc += `📡 **Sub:** ${getEmoji(s.event)} ${s.event} on ${s.map}\n`;
+                    if (m) {
+                        desc += `└ 🟢 **Upcoming:** <t:${Math.floor(m.startTime/1000)}:F>\n`;
+                        s.offsets.forEach(o => {
+                            const t = m.startTime - Number(o);
+                            if (t > now) desc += `   └ 🔔 **Next Alert:** <t:${Math.floor(t/1000)}:R>\n`;
+                            else desc += `   └ ⚪ **Alert Passed**\n`;
                         });
-                    } else desc += `└ ⚪ **No matching events found** in the schedule.\n`;
-                    desc += `\n`;
+                    } else desc += `└ ⚪ **No matching events found** in schedule.\n`;
                 }
                 embed.setDescription(desc);
                 await interaction.user.send({ embeds: [embed] });
-                await interaction.editReply({ content: "✅ Diagnostic DM sent!" }).catch(() => {});
-            } catch (e) {
-                console.error(`[Test DM] Error:`, e.message);
-                await interaction.editReply({ content: `❌ Test failed: ${e.message}` }).catch(() => {});
-            }
+                await interaction.editReply({ content: "✅ Diagnostic DM sent!" });
+            } catch (e) { await interaction.editReply({ content: `❌ Failed: ${e.message}` }); }
         }
 
         if (interaction.commandName === 'subscribe') {
             const subs = await getUserSubscriptions(interaction.user.id);
-            const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal DM rotation alerts.');
+            const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal rotation alerts.');
             if (subs.length > 0) {
                 const list = subs.map(s => `• ${getEmoji(s.event)} ${s.event} on ${s.map}\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`).join('\n\n');
                 embed.addFields({ name: 'Active Alerts', value: list });
                 const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
                 await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
             } else {
-                embed.addFields({ name: 'Status', value: 'No active personal subscriptions found.' });
+                embed.addFields({ name: 'Status', value: 'No alerts.' });
                 await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success))], flags: [MessageFlags.Ephemeral] });
             }
         }
@@ -554,12 +597,11 @@ client.on('interactionCreate', async interaction => {
         }
         if (interaction.commandName === 'update') {
             await interaction.reply({ content: '🔄 Refreshing all data, embeds, and active pings...', flags: [MessageFlags.Ephemeral] });
-            await updateEvents(interaction.guildId, true, true); // True, True ensures full cleanup and repost
+            await updateEvents(interaction.guildId, true, true); 
         }
-    } catch (fatalInter) { console.error('❌ Interaction handler failed:', fatalInter.message); }
+    } catch (fatal) { console.error('❌ Interaction Error:', fatal.message); }
 });
 
-// DM Forwarding
 client.on('messageCreate', async m => {
     if (m.author.bot || m.guild) return;
     if (m.author.id === OWNER_ID && m.content.toLowerCase() === 'ping') return m.reply('Pong!');
@@ -572,29 +614,17 @@ client.on('messageCreate', async m => {
 client.once(Events.ClientReady, async () => {
     console.log(`[Startup] Logged in as ${client.user.tag}`);
     client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
-
     (async () => {
-        await ensureAuth(); 
-        await loadAllConfigs(); 
-        await refreshCaches();
+        await ensureAuth(); await loadAllConfigs(); await refreshCaches();
         const rest = new REST({ version: '10' }).setToken(TOKEN);
         try {
-            console.log(`[Startup] Synchronizing Slash Commands...`);
-            const guilds = client.guilds.cache;
-            for (const [gid] of guilds) { try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); } catch (e) {} }
+            for (const [gid] of client.guilds.cache) { try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); } catch (e) {} }
             await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
-        } catch (e) { console.error('[Startup] Slash command fatal error:', e.message); }
-        
-        // --- STARTUP CLEANUP: Repost everything for a fresh start ---
+        } catch (e) {}
         await updateEvents(null, true, true); 
         setInterval(updateEvents, CHECK_INTERVAL);
-        console.log('[Startup] Bot logic loop started.');
     })();
 });
 
-process.on('unhandledRejection', error => { console.error('⚠️ Unhandled promise rejection:', error.message); });
-
-client.login(TOKEN).catch(err => {
-    console.error('❌ Discord Login Error:', err.message);
-    process.exit(1);
-});
+process.on('unhandledRejection', error => { console.error('⚠️ Unhandled rejection:', error.message); });
+client.login(TOKEN).catch(console.error);
