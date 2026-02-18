@@ -427,7 +427,7 @@ const commandsData = [
     new SlashCommandBuilder().setName('quests').setDescription('Quest Logs').addStringOption(option => option.setName('name').setDescription('Quest').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('servers').setDescription('Admin Console').toJSON(),
     new SlashCommandBuilder().setName('subscribe').setDescription('Personal DM Alerts').toJSON(),
-    new SlashCommandBuilder().setName('test-dm').setDescription('Send a test DM to yourself to verify your rotation alerts are working').toJSON()
+    new SlashCommandBuilder().setName('test-dm').setDescription('Send a test DM to yourself to verify your rotation alerts are working (Owner Only)').toJSON()
 ];
 
 client.on('interactionCreate', async interaction => {
@@ -488,27 +488,72 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === 'test-dm') {
-        const subs = await getUserSubscriptions(interaction.user.id);
-        if (subs.length === 0) {
-            return interaction.reply({ content: "❌ You have no active subscriptions to test. Use `/subscribe` first!", flags: [MessageFlags.Ephemeral] });
+        // OWNER ONLY CHECK
+        if (interaction.user.id !== OWNER_ID) {
+            return interaction.reply({ content: "❌ Unauthorized: This command is restricted to the bot developer.", flags: [MessageFlags.Ephemeral] });
         }
 
-        // Repair subscription link if it was missing
-        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
+        await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+        console.log(`[Test DM] Initiated by owner ${interaction.user.tag}`);
 
-        const embed = new EmbedBuilder()
-            .setTitle("🧪 Test Alert")
-            .setDescription(`This is a test notification for your subscriptions:\n${subs.map(s => `• ${getEmoji(s.event)} ${s.event} on ${s.map}`).join('\n')}`)
-            .setColor(0x3498db)
-            .setFooter({ text: "If you received this, your alerts are configured correctly." })
-            .setTimestamp();
+        const subs = await getUserSubscriptions(interaction.user.id);
+        if (subs.length === 0) {
+            return interaction.editReply({ content: "❌ You have no active subscriptions to test. Use `/subscribe` first!" });
+        }
 
         try {
+            const response = await axios.get(API_URL);
+            const events = response.data?.data || [];
+            const now = Date.now();
+
+            let nextTriggerTime = null;
+            let nextTriggerInfo = "";
+
+            // Calculate the absolute next notification that should occur
+            for (const sub of subs) {
+                const relevantEvents = events.filter(e => 
+                    e.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && 
+                    e.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && 
+                    e.startTime > now
+                );
+
+                for (const ev of relevantEvents) {
+                    for (const offset of sub.offsets) {
+                        const triggerAt = ev.startTime - Number(offset);
+                        if (triggerAt > now) {
+                            if (!nextTriggerTime || triggerAt < nextTriggerTime) {
+                                nextTriggerTime = triggerAt;
+                                nextTriggerInfo = `${getEmoji(ev.name)} **${ev.name}** on **${ev.map}**`;
+                            }
+                        }
+                    }
+                }
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle("🧪 Personal Alert System Test")
+                .setColor(0x3498db)
+                .setTimestamp();
+
+            let desc = `This is a verification DM for your account: **${interaction.user.tag}**.\n\n`;
+            desc += `**Active Subs Detected:** ${subs.length}\n`;
+            
+            if (nextTriggerTime) {
+                desc += `\n🎯 **Next Scheduled Notification:**\n${nextTriggerInfo}\nStarts <t:${Math.floor(nextTriggerTime/1000) + Math.round((nextTriggerTime - now)/1000)}:R>\n(Bot will DM you at <t:${Math.floor(nextTriggerTime/1000)}:f>)`;
+            } else {
+                desc += "\n⚠️ **No future alerts found:** No events matching your subs are currently in the 3-hour API schedule window.";
+            }
+
+            embed.setDescription(desc);
+            embed.setFooter({ text: "If you can see this, your DM permissions and subscription data are correct." });
+
             await interaction.user.send({ embeds: [embed] });
-            await interaction.reply({ content: "✅ Test DM sent! Check your direct messages.", flags: [MessageFlags.Ephemeral] });
+            await interaction.editReply({ content: "✅ Test DM sent successfully! Check your DMs for details on your next alert." });
+            console.log(`[Test DM] Success for ${interaction.user.tag}. Next alert: ${nextTriggerTime ? new Date(nextTriggerTime).toISOString() : 'None'}`);
+
         } catch (e) {
-            console.error(`[Test DM] Failed to send to ${interaction.user.tag}:`, e.message);
-            await interaction.reply({ content: "❌ Failed to send DM. Please ensure your direct messages are open for this server.", flags: [MessageFlags.Ephemeral] });
+            console.error(`[Test DM] Fatal Error:`, e.message);
+            await interaction.editReply({ content: `❌ Test failed: ${e.message}` });
         }
     }
 
@@ -557,7 +602,7 @@ client.once(Events.ClientReady, async () => {
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
         const guilds = client.guilds.cache;
-        for (const [gid] of guilds) { try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); } catch (e) {} }
+        for (const [gid] of guilds) { try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); } catch (err) {} }
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
     } catch (e) {}
     updateEvents(); setInterval(updateEvents, CHECK_INTERVAL);
