@@ -258,7 +258,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
         const alertWindow = now + (60 * 60 * 1000); 
         const scheduleWindow = now + (3 * 60 * 60 * 1000); 
 
-        // --- HARDENED & OPTIMIZED DM ENGINE ---
+        // --- GLOBAL DM ENGINE ---
         if (!targetGuildId) {
             try {
                 const activeUsersSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'subscription_users'));
@@ -266,13 +266,16 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     const userId = userDoc.id;
                     const subs = await getUserSubscriptions(userId);
                     const discordUser = await client.users.fetch(userId).catch(() => null);
-                    if (!discordUser || subs.length === 0) continue;
+                    
+                    if (!discordUser) {
+                        console.warn(`[DM Engine] Could not fetch user ${userId}, skipping.`);
+                        continue;
+                    }
+                    if (subs.length === 0) continue;
 
                     for (const sub of subs) {
-                        // Hardened Defensive Checks
                         if (!sub?.map || !sub?.event || !Array.isArray(sub?.offsets)) continue;
 
-                        // Case-insensitive & Trimmed Matching (Hardened)
                         const matchedEvent = events.find(ev => 
                             ev.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && 
                             ev.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && 
@@ -282,10 +285,8 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                         if (matchedEvent) {
                             const timeUntil = matchedEvent.startTime - now;
                             for (const offsetMs of sub.offsets) {
-                                // Data type safety
                                 if (typeof offsetMs !== "number") continue;
 
-                                // 60-second trigger window
                                 if (timeUntil <= offsetMs && timeUntil > (offsetMs - 60000)) {
                                     const alertKey = `dm_${userId}_${matchedEvent.map}_${matchedEvent.name}_${matchedEvent.startTime}_${offsetMs}`;
                                     const lockDoc = doc(db, 'artifacts', appId, 'public', 'data', 'sent_alerts', alertKey);
@@ -300,12 +301,14 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
 
                                         try {
                                             await discordUser.send({ embeds: [embed] });
-                                            // Save lock with expiration (Hardened Version logic)
+                                            console.log(`[DM Engine] ✅ Sent alert to ${discordUser.tag} for ${matchedEvent.name}`);
                                             await setDoc(lockDoc, { 
                                                 sent_at: now,
                                                 expires_at: matchedEvent.startTime + (24 * 60 * 60 * 1000)
                                             });
-                                        } catch (dmErr) {}
+                                        } catch (dmErr) {
+                                            console.error(`[DM Engine] ❌ Failed to DM ${discordUser.tag}: ${dmErr.message}`);
+                                        }
                                     }
                                 }
                             }
@@ -423,7 +426,8 @@ const commandsData = [
     new SlashCommandBuilder().setName('traders').setDescription('Trader Inventories').addStringOption(option => option.setName('name').setDescription('Trader/Category').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('quests').setDescription('Quest Logs').addStringOption(option => option.setName('name').setDescription('Quest').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('servers').setDescription('Admin Console').toJSON(),
-    new SlashCommandBuilder().setName('subscribe').setDescription('Personal DM Alerts').toJSON()
+    new SlashCommandBuilder().setName('subscribe').setDescription('Personal DM Alerts').toJSON(),
+    new SlashCommandBuilder().setName('test-dm').setDescription('Send a test DM to yourself to verify your rotation alerts are working').toJSON()
 ];
 
 client.on('interactionCreate', async interaction => {
@@ -463,20 +467,11 @@ client.on('interactionCreate', async interaction => {
         }
         if (interaction.customId.startsWith('sub_create_times|')) {
             const [, map, event] = interaction.customId.split('|');
-            // Ensure offsets are numbers for hardened logic
             const numericOffsets = interaction.values.map(v => Number(v));
             const subId = `${map}_${event}`.toLowerCase().replace(/\s/g, '_');
             await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: numericOffsets, created_at: Date.now() });
             await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
             await interaction.update({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
-        }
-        if (interaction.customId === 'server_mgmt_select') {
-            if (interaction.user.id !== OWNER_ID) return;
-            const guild = await client.guilds.fetch(interaction.values[0]);
-            const owner = await guild.fetchOwner();
-            const embed = new EmbedBuilder().setTitle(guild.name).addFields({ name: 'Owner', value: owner.user.tag });
-            const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Invite').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`srv_dm_${owner.id}`).setLabel('DM').setStyle(ButtonStyle.Secondary));
-            await interaction.reply({ embeds: [embed], components: [row], flags: [MessageFlags.Ephemeral] });
         }
         return;
     }
@@ -488,29 +483,34 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ content: "📝 **New Subscription**\nPick map:", components: [new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
             return;
         }
-        if (interaction.user.id !== OWNER_ID) return;
-        const [, action, tid] = interaction.customId.split('_');
-        if (action === 'invite') {
-            const g = await client.guilds.fetch(tid);
-            const c = g.channels.cache.find(ch => ch.isTextBased() && ch.permissionsFor(client.user).has('CreateInstantInvite'));
-            const inv = await c.createInvite();
-            await interaction.reply({ content: inv.url, flags: [MessageFlags.Ephemeral] });
-        }
-        if (action === 'dm') {
-            const m = new ModalBuilder().setCustomId(`srv_modal_dm_${tid}`).setTitle('Message');
-            const i = new TextInputBuilder().setCustomId('dm_text').setLabel('Content').setStyle(TextInputStyle.Paragraph);
-            m.addComponents(new ActionRowBuilder().addComponents(i));
-            await interaction.showModal(m);
-        }
-    }
-
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('srv_modal_dm_')) {
-        const u = await client.users.fetch(interaction.customId.replace('srv_modal_dm_', ''));
-        await u.send(interaction.fields.getTextInputValue('dm_text'));
-        await interaction.reply({ content: "Sent.", flags: [MessageFlags.Ephemeral] });
     }
 
     if (!interaction.isChatInputCommand()) return;
+
+    if (interaction.commandName === 'test-dm') {
+        const subs = await getUserSubscriptions(interaction.user.id);
+        if (subs.length === 0) {
+            return interaction.reply({ content: "❌ You have no active subscriptions to test. Use `/subscribe` first!", flags: [MessageFlags.Ephemeral] });
+        }
+
+        // Repair subscription link if it was missing
+        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
+
+        const embed = new EmbedBuilder()
+            .setTitle("🧪 Test Alert")
+            .setDescription(`This is a test notification for your subscriptions:\n${subs.map(s => `• ${getEmoji(s.event)} ${s.event} on ${s.map}`).join('\n')}`)
+            .setColor(0x3498db)
+            .setFooter({ text: "If you received this, your alerts are configured correctly." })
+            .setTimestamp();
+
+        try {
+            await interaction.user.send({ embeds: [embed] });
+            await interaction.reply({ content: "✅ Test DM sent! Check your direct messages.", flags: [MessageFlags.Ephemeral] });
+        } catch (e) {
+            console.error(`[Test DM] Failed to send to ${interaction.user.tag}:`, e.message);
+            await interaction.reply({ content: "❌ Failed to send DM. Please ensure your direct messages are open for this server.", flags: [MessageFlags.Ephemeral] });
+        }
+    }
 
     if (interaction.commandName === 'subscribe') {
         const subs = await getUserSubscriptions(interaction.user.id);
@@ -539,16 +539,9 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: '🔄 Refreshing...', flags: [MessageFlags.Ephemeral] });
         await updateEvents(interaction.guildId, true);
     }
-    if (interaction.commandName === 'arc') {
-        const a = arcCache.find(i => i.id === interaction.options.getString('unit'));
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(a.name).setDescription(a.description).setThumbnail(a.icon).setImage(a.image)] });
-    }
-    if (interaction.commandName === 'item') {
-        const i = itemCache.find(it => it.id === interaction.options.getString('name'));
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(i.name).setDescription(i.description || 'No data.').setThumbnail(i.icon).addFields({ name: 'Rarity', value: i.rarity || 'Common', inline: true })] });
-    }
 });
 
+// DM Forwarding
 client.on('messageCreate', async m => {
     if (m.author.bot || m.guild) return;
     if (m.author.id === OWNER_ID && m.content.toLowerCase() === 'ping') return m.reply('Pong!');
@@ -568,6 +561,11 @@ client.once(Events.ClientReady, async () => {
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
     } catch (e) {}
     updateEvents(); setInterval(updateEvents, CHECK_INTERVAL);
+});
+
+// GLOBAL PROTECTION: Prevent bot from crashing on unhandled Discord or API errors
+process.on('unhandledRejection', error => {
+    console.error('Unhandled promise rejection:', error);
 });
 
 client.login(TOKEN).catch(console.error);
