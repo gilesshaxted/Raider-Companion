@@ -302,21 +302,33 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     const group = groupedEvents[groupKey];
                     const first = group[0];
 
-                    const alreadyScheduled = existingScheduledEvents.some(se => {
+                    // Find if there is an existing event in this map/time slot
+                    const existingEvent = existingScheduledEvents.find(se => {
                         const sameLocation = se.entityMetadata?.location === first.map;
                         const sameTimeWindow = Math.abs(se.scheduledStartTimestamp - first.startTime) < 120000;
                         return sameLocation && sameTimeWindow;
                     });
 
-                    if (!alreadyScheduled) {
+                    // Build combined title and description
+                    const combinedTitle = group.map(ev => `${getEmoji(ev.name)} ${ev.name}`).join(' & ');
+                    const finalName = `${combinedTitle} (${first.map})`.substring(0, 100);
+                    const finalDesc = `Upcoming rotation group on ${first.map}:\n${group.map(ev => `• ${getEmoji(ev.name)} **${ev.name}**`).join('\n')}`;
+
+                    const mapKey = Object.keys(mapConfigs).find(k => k.toLowerCase().replace(/\s/g, '') === first.map?.toLowerCase().replace(/\s/g, ''));
+                    const dataURI = mapKey ? getLocalImageAsDataURI(mapConfigs[mapKey].fileName) : null;
+
+                    if (existingEvent) {
+                        // UPDATE: Synchronize existing event details if something changed
                         try {
-                            // Build combined title: "Emoji Name & Emoji Name (Map)"
-                            const combinedTitle = group.map(ev => `${getEmoji(ev.name)} ${ev.name}`).join(' & ');
-                            const finalName = `${combinedTitle} (${first.map})`.substring(0, 100);
-
-                            const mapKey = Object.keys(mapConfigs).find(k => k.toLowerCase().replace(/\s/g, '') === first.map?.toLowerCase().replace(/\s/g, ''));
-                            const dataURI = mapKey ? getLocalImageAsDataURI(mapConfigs[mapKey].fileName) : null;
-
+                            await existingEvent.edit({
+                                name: finalName,
+                                description: finalDesc,
+                                image: dataURI // Re-uploading ensures it matches the local file
+                            });
+                        } catch (err) { console.error(`❌ Event Edit Error:`, err.message); }
+                    } else {
+                        // CREATE: Create a new native event if missing
+                        try {
                             await guild.scheduledEvents.create({
                                 name: finalName,
                                 scheduledStartTime: new Date(first.startTime),
@@ -325,9 +337,9 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                                 entityType: GuildScheduledEventEntityType.External,
                                 entityMetadata: { location: first.map },
                                 image: dataURI, 
-                                description: `Upcoming rotation group on ${first.map}:\n${group.map(ev => `• ${getEmoji(ev.name)} **${ev.name}**`).join('\n')}`
+                                description: finalDesc
                             });
-                        } catch (err) { console.error(`❌ Multi-Event Create Error:`, err.message); }
+                        } catch (err) { console.error(`❌ Event Create Error:`, err.message); }
                     }
                     
                     // 3. INDIVIDUAL CHANNEL PING LOGIC (Keep individual for role pings)
