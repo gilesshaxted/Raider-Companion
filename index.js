@@ -213,7 +213,6 @@ async function refreshCaches() {
         for (const [traderName, items] of Object.entries(traderCache)) {
             items.forEach(item => { traderItemsFlat.push({ ...item, traderName }); });
         }
-        console.log('API: Caches refreshed.');
     } catch (e) { console.error("❌ Error refreshing caches:", e.message); }
 }
 
@@ -426,7 +425,7 @@ client.on('interactionCreate', async interaction => {
         }
         if (interaction.customId === 'sub_delete_select') {
             await deleteDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', interaction.values[0]));
-            await interaction.update({ content: "✅ Deleted.", embeds: [], components: [] });
+            await interaction.update({ content: "✅ Subscription deleted.", embeds: [], components: [] });
         }
         if (interaction.customId === 'sub_create_map') {
             const map = interaction.values[0];
@@ -493,13 +492,14 @@ client.on('interactionCreate', async interaction => {
         const subs = await getUserSubscriptions(interaction.user.id);
         const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal DM rotation alerts.');
         if (subs.length > 0) {
-            // FIXED: Prominent display of Event Name, Map, and Emoji
-            const list = subs.map(s => `• ${getEmoji(s.event)} **${s.event}** (${s.map})\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === o)?.label).join(', ')}`).join('\n\n');
+            // FIXED: Prominent display using "[Event Name] on [Map Name]" format
+            const list = subs.map(s => `• ${getEmoji(s.event)} **${s.event}** on **${s.map}**\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === o)?.label).join(', ')}`).join('\n\n');
             embed.addFields({ name: 'Active Alerts', value: list });
-            const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event} (${s.map})`, value: s.id })));
+            // FIXED: Dropdown labels correctly show "[Event] on [Map]"
+            const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
             await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
         } else {
-            embed.addFields({ name: 'Status', value: 'No alerts.' });
+            embed.addFields({ name: 'Status', value: 'No active personal subscriptions found.' });
             await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success))], flags: [MessageFlags.Ephemeral] });
         }
     }
