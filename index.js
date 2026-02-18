@@ -172,6 +172,7 @@ async function loadAllConfigs() {
                 const guildId = doc.id.replace(`${CLIENT_ID}_`, '');
                 const data = doc.data();
                 if (!data.alertedEventKeys) data.alertedEventKeys = [];
+                if (!data.activeAlerts) data.activeAlerts = [];
                 guildConfigs.set(guildId, data);
             }
         });
@@ -247,7 +248,13 @@ function getLocalImageAsDataURI(fileName) {
 }
 
 // --- BOT LOGIC ---
-async function updateEvents(targetGuildId = null, forceNewMessages = false) {
+/**
+ * updateEvents handles embed refreshing, native event sync, and role pings.
+ * @param {string|null} targetGuildId - Specific guild to update
+ * @param {boolean} forceNewMessages - Whether to delete and repost map embeds
+ * @param {boolean} purgeActivePings - Whether to delete existing role pings (e.g. on restart)
+ */
+async function updateEvents(targetGuildId = null, forceNewMessages = false, purgeActivePings = false) {
     if (!targetGuildId) {
         if (isGlobalUpdating) return;
         isGlobalUpdating = true;
@@ -270,52 +277,26 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     const userId = userDoc.id;
                     const subs = await getUserSubscriptions(userId);
                     const discordUser = await client.users.fetch(userId).catch(() => null);
-                    
-                    if (!discordUser) continue;
-                    if (subs.length === 0) continue;
-
+                    if (!discordUser || subs.length === 0) continue;
                     for (const sub of subs) {
-                        if (!sub?.map || !sub?.event || !Array.isArray(sub?.offsets)) continue;
-
-                        const matchedEvent = events.find(ev => 
-                            ev.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && 
-                            ev.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && 
-                            ev.startTime > now
-                        );
-
+                        const matchedEvent = events.find(ev => ev.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && ev.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && ev.startTime > now);
                         if (matchedEvent) {
                             const timeUntil = matchedEvent.startTime - now;
                             for (const offsetMs of sub.offsets) {
-                                const offsetNum = Number(offsetMs);
                                 if (timeUntil <= offsetNum && timeUntil > (offsetNum - 120000)) {
                                     const alertKey = `dm_${userId}_${matchedEvent.map}_${matchedEvent.name}_${matchedEvent.startTime}_${offsetNum}`;
                                     const lockDoc = doc(db, 'artifacts', appId, 'public', 'data', 'sent_alerts', alertKey);
-                                    
                                     const lockSnap = await getDoc(lockDoc);
                                     if (!lockSnap.exists()) {
-                                        const embed = new EmbedBuilder()
-                                            .setTitle("🔔 Rotation Starting Soon")
-                                            .setDescription(`${getEmoji(matchedEvent.name)} **${matchedEvent.name}** on **${matchedEvent.map}** starts <t:${Math.floor(matchedEvent.startTime/1000)}:R>!`)
-                                            .setColor(0x00AE86)
-                                            .setTimestamp();
-
-                                        try {
-                                            await discordUser.send({ embeds: [embed] });
-                                            console.log(`[DM Engine] ✅ Sent alert to ${discordUser.tag} for ${matchedEvent.name}`);
-                                            await setDoc(lockDoc, { 
-                                                sent_at: now,
-                                                expires_at: matchedEvent.startTime + (24 * 60 * 60 * 1000)
-                                            });
-                                        } catch (dmErr) {
-                                            console.error(`[DM Engine] ❌ Failed to DM ${discordUser.tag}: ${dmErr.message}`);
-                                        }
+                                        const embed = new EmbedBuilder().setTitle("🔔 Rotation Starting").setDescription(`${getEmoji(matchedEvent.name)} **${matchedEvent.name}** on **${matchedEvent.map}** starts <t:${Math.floor(matchedEvent.startTime/1000)}:R>!`).setColor(0x00AE86).setTimestamp();
+                                        try { await discordUser.send({ embeds: [embed] }); await setDoc(lockDoc, { sent_at: now, expires_at: matchedEvent.startTime + (24 * 60 * 60 * 1000) }); } catch (dmErr) {}
                                     }
                                 }
                             }
                         }
                     }
                 }
-            } catch (engErr) { console.error("DM engine error:", engErr.message); }
+            } catch (engErr) {}
         }
 
         const guildsToUpdate = targetGuildId ? [[targetGuildId, guildConfigs.get(targetGuildId)]] : Array.from(guildConfigs.entries());
@@ -329,6 +310,29 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                 if (!channel) continue;
                 const guild = channel.guild;
 
+                // 1. CLEANUP ROLE PINGS (Expired or Forced)
+                if (config.activeAlerts && config.activeAlerts.length > 0) {
+                    const freshAlerts = [];
+                    for (const alert of config.activeAlerts) {
+                        // Delete if expired OR if we are doing a forced restart cleanup
+                        if (now >= alert.startTime || purgeActivePings) {
+                            try { 
+                                const msg = await channel.messages.fetch(alert.messageId); 
+                                await msg.delete(); 
+                            } catch (err) {}
+                            
+                            // If forced cleanup, remove the key so it gets repinged immediately below
+                            if (purgeActivePings) {
+                                config.alertedEventKeys = config.alertedEventKeys.filter(k => !k.includes(String(alert.startTime)));
+                            }
+                        } else {
+                            freshAlerts.push(alert);
+                        }
+                    }
+                    config.activeAlerts = freshAlerts;
+                }
+
+                // 2. DISCORD SCHEDULED EVENTS: GROUPED LOGIC
                 let existingScheduledEvents = [];
                 try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
                 const seenSlots = new Set();
@@ -358,6 +362,8 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     else {
                         try { await guild.scheduledEvents.create({ name: finalName, scheduledStartTime: new Date(first.startTime), scheduledEndTime: new Date(Math.max(...group.map(ev => ev.endTime))), privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly, entityType: GuildScheduledEventEntityType.External, entityMetadata: { location: first.map }, image: dataURI, description: finalDesc }); } catch (err) {}
                     }
+                    
+                    // --- ROLE PING REPOST LOGIC ---
                     for (const e of group) {
                         const alertKey = `${e.name}_${e.map}_${e.startTime}`;
                         if (e.startTime <= alertWindow && !config.alertedEventKeys.includes(alertKey)) {
@@ -371,6 +377,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     }
                 }
 
+                // 4. MAP EMBEDS & SUMMARY
                 if (forceNewMessages) {
                     for (const key in config.messageIds) { if (config.messageIds[key]) { try { const m = await channel.messages.fetch(config.messageIds[key]); await m.delete(); } catch (e) {} config.messageIds[key] = null; } }
                 }
@@ -420,7 +427,7 @@ function buildTraderItemEmbed(item) {
 
 const commandsData = [
     new SlashCommandBuilder().setName('setup').setDescription('Configure update channel').addChannelOption(option => option.setName('channel').setDescription('Channel').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
-    new SlashCommandBuilder().setName('update').setDescription('Force refresh').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
+    new SlashCommandBuilder().setName('update').setDescription('Force a clean refresh of all embeds and pings').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
     new SlashCommandBuilder().setName('arc').setDescription('ARC Intel').addStringOption(option => option.setName('unit').setDescription('Unit').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('item').setDescription('Item Search').addStringOption(option => option.setName('name').setDescription('Item').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('traders').setDescription('Trader Inventories').addStringOption(option => option.setName('name').setDescription('Trader/Category').setRequired(true).setAutocomplete(true)).toJSON(),
@@ -490,54 +497,35 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.commandName === 'test-dm') {
             if (interaction.user.id !== OWNER_ID) {
-                return interaction.reply({ content: "❌ Unauthorized: Developer Only.", flags: [MessageFlags.Ephemeral] });
+                return interaction.reply({ content: "❌ Developer Only.", flags: [MessageFlags.Ephemeral] });
             }
             await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }).catch(() => {});
-
             const subs = await getUserSubscriptions(interaction.user.id);
-            if (subs.length === 0) {
-                return interaction.editReply({ content: "❌ You have no active subscriptions to test." }).catch(() => {});
-            }
+            if (subs.length === 0) return interaction.editReply({ content: "❌ No subscriptions to test." }).catch(() => {});
 
             try {
                 const response = await axios.get(API_URL);
                 const events = response.data?.data || [];
                 const now = Date.now();
-
                 const embed = new EmbedBuilder().setTitle("🧪 Personal Alert System Diagnostic").setColor(0x3498db).setTimestamp();
                 let desc = `Verification for: **${interaction.user.tag}**.\n\n`;
-
                 for (const sub of subs) {
-                    const matchedEvent = events.find(e => 
-                        e.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && 
-                        e.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && 
-                        e.startTime > now
-                    );
-
+                    const matchedEvent = events.find(e => e.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && e.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && e.startTime > now);
                     desc += `📡 **Sub:** ${getEmoji(sub.event)} ${sub.event} on ${sub.map}\n`;
-                    
                     if (matchedEvent) {
                         desc += `└ 🟢 **Found Upcoming:** <t:${Math.floor(matchedEvent.startTime/1000)}:F>\n`;
                         sub.offsets.forEach(offset => {
                             const triggerAt = matchedEvent.startTime - Number(offset);
                             const label = notificationTimes.find(t => t.value === String(offset))?.label || `${offset}ms`;
-                            if (triggerAt > now) {
-                                desc += `   └ 🔔 **Next Alert (${label}):** <t:${Math.floor(triggerAt/1000)}:f> (<t:${Math.floor(triggerAt/1000)}:R>)\n`;
-                            } else {
-                                desc += `   └ ⚪ **Alert Passed (${label}):** <t:${Math.floor(triggerAt/1000)}:f>\n`;
-                            }
+                            if (triggerAt > now) desc += `   └ 🔔 **Next Alert (${label}):** <t:${Math.floor(triggerAt/1000)}:f> (<t:${Math.floor(triggerAt/1000)}:R>)\n`;
+                            else desc += `   └ ⚪ **Alert Passed (${label}):** <t:${Math.floor(triggerAt/1000)}:f>\n`;
                         });
-                    } else {
-                        desc += `└ ⚪ **No matching events found** in the current 3-hour schedule window.\n`;
-                    }
+                    } else desc += `└ ⚪ **No matching events found** in the schedule.\n`;
                     desc += `\n`;
                 }
-
                 embed.setDescription(desc);
-                embed.setFooter({ text: "Use these timestamps to verify the DM Engine catches your alerts." });
-
                 await interaction.user.send({ embeds: [embed] });
-                await interaction.editReply({ content: "✅ Detailed diagnostic DM sent! Check your DMs for the full countdown schedule." }).catch(() => {});
+                await interaction.editReply({ content: "✅ Diagnostic DM sent!" }).catch(() => {});
             } catch (e) {
                 console.error(`[Test DM] Error:`, e.message);
                 await interaction.editReply({ content: `❌ Test failed: ${e.message}` }).catch(() => {});
@@ -548,10 +536,7 @@ client.on('interactionCreate', async interaction => {
             const subs = await getUserSubscriptions(interaction.user.id);
             const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal DM rotation alerts.');
             if (subs.length > 0) {
-                const list = subs.map(s => 
-`• ${getEmoji(s.event)} ${s.event} on ${s.map}
-└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`
-            ).join('\n\n');
+                const list = subs.map(s => `• ${getEmoji(s.event)} ${s.event} on ${s.map}\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`).join('\n\n');
                 embed.addFields({ name: 'Active Alerts', value: list });
                 const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
                 await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
@@ -565,11 +550,11 @@ client.on('interactionCreate', async interaction => {
             const c = interaction.options.getChannel('channel');
             guildConfigs.set(interaction.guildId, { channelId: c.id, activeAlerts: [], alertedEventKeys: [], messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null } });
             await interaction.reply({ content: "✅ Setup.", flags: [MessageFlags.Ephemeral] });
-            await updateEvents(interaction.guildId, true);
+            await updateEvents(interaction.guildId, true, true);
         }
         if (interaction.commandName === 'update') {
-            await interaction.reply({ content: '🔄 Refreshing...', flags: [MessageFlags.Ephemeral] });
-            await updateEvents(interaction.guildId, true);
+            await interaction.reply({ content: '🔄 Refreshing all data, embeds, and active pings...', flags: [MessageFlags.Ephemeral] });
+            await updateEvents(interaction.guildId, true, true); // True, True ensures full cleanup and repost
         }
     } catch (fatalInter) { console.error('❌ Interaction handler failed:', fatalInter.message); }
 });
@@ -598,10 +583,10 @@ client.once(Events.ClientReady, async () => {
             const guilds = client.guilds.cache;
             for (const [gid] of guilds) { try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); } catch (e) {} }
             await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
-            console.log('[Startup] Slash command sync complete.');
         } catch (e) { console.error('[Startup] Slash command fatal error:', e.message); }
         
-        await updateEvents(); 
+        // --- STARTUP CLEANUP: Repost everything for a fresh start ---
+        await updateEvents(null, true, true); 
         setInterval(updateEvents, CHECK_INTERVAL);
         console.log('[Startup] Bot logic loop started.');
     })();
