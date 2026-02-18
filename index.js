@@ -258,7 +258,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
         const alertWindow = now + (60 * 60 * 1000); 
         const scheduleWindow = now + (3 * 60 * 60 * 1000); 
 
-        // GLOBAL DM ENGINE
+        // --- HARDENED & OPTIMIZED DM ENGINE ---
         if (!targetGuildId) {
             try {
                 const activeUsersSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'subscription_users'));
@@ -266,23 +266,45 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     const userId = userDoc.id;
                     const subs = await getUserSubscriptions(userId);
                     const discordUser = await client.users.fetch(userId).catch(() => null);
-                    if (!discordUser) continue;
+                    if (!discordUser || subs.length === 0) continue;
+
                     for (const sub of subs) {
-                        const matchedEvent = events.find(ev => ev.map === sub.map && ev.name === sub.event && ev.startTime > now);
+                        // Hardened Defensive Checks
+                        if (!sub?.map || !sub?.event || !Array.isArray(sub?.offsets)) continue;
+
+                        // Case-insensitive & Trimmed Matching (Hardened)
+                        const matchedEvent = events.find(ev => 
+                            ev.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && 
+                            ev.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && 
+                            ev.startTime > now
+                        );
+
                         if (matchedEvent) {
                             const timeUntil = matchedEvent.startTime - now;
-                            for (const offset of sub.offsets) {
-                                const offsetMs = parseInt(offset);
+                            for (const offsetMs of sub.offsets) {
+                                // Data type safety
+                                if (typeof offsetMs !== "number") continue;
+
+                                // 60-second trigger window
                                 if (timeUntil <= offsetMs && timeUntil > (offsetMs - 60000)) {
-                                    const alertKey = `dm_${userId}_${matchedEvent.map}_${matchedEvent.name}_${matchedEvent.startTime}_${offset}`;
+                                    const alertKey = `dm_${userId}_${matchedEvent.map}_${matchedEvent.name}_${matchedEvent.startTime}_${offsetMs}`;
                                     const lockDoc = doc(db, 'artifacts', appId, 'public', 'data', 'sent_alerts', alertKey);
+                                    
                                     const lockSnap = await getDoc(lockDoc);
                                     if (!lockSnap.exists()) {
-                                        const mins = Math.round(offsetMs / 60000);
-                                        const leadText = mins >= 60 ? `${mins/60} hour(s)` : `${mins} minutes`;
+                                        const embed = new EmbedBuilder()
+                                            .setTitle("🔔 Rotation Starting Soon")
+                                            .setDescription(`${getEmoji(matchedEvent.name)} **${matchedEvent.name}** on **${matchedEvent.map}** starts <t:${Math.floor(matchedEvent.startTime/1000)}:R>!`)
+                                            .setColor(0x00AE86)
+                                            .setTimestamp();
+
                                         try {
-                                            await discordUser.send(`🔔 **Intel Alert:** ${getEmoji(matchedEvent.name)} **${matchedEvent.name}** on **${matchedEvent.map}** starts in **${leadText}** (<t:${Math.floor(matchedEvent.startTime/1000)}:R>)!`);
-                                            await setDoc(lockDoc, { sent_at: Date.now() });
+                                            await discordUser.send({ embeds: [embed] });
+                                            // Save lock with expiration (Hardened Version logic)
+                                            await setDoc(lockDoc, { 
+                                                sent_at: now,
+                                                expires_at: matchedEvent.startTime + (24 * 60 * 60 * 1000)
+                                            });
                                         } catch (dmErr) {}
                                     }
                                 }
@@ -290,7 +312,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                         }
                     }
                 }
-            } catch (engErr) {}
+            } catch (engErr) { console.error("DM engine runtime error:", engErr.message); }
         }
 
         const guildsToUpdate = targetGuildId ? [[targetGuildId, guildConfigs.get(targetGuildId)]] : Array.from(guildConfigs.entries());
@@ -441,10 +463,12 @@ client.on('interactionCreate', async interaction => {
         }
         if (interaction.customId.startsWith('sub_create_times|')) {
             const [, map, event] = interaction.customId.split('|');
+            // Ensure offsets are numbers for hardened logic
+            const numericOffsets = interaction.values.map(v => Number(v));
             const subId = `${map}_${event}`.toLowerCase().replace(/\s/g, '_');
-            await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: interaction.values, created_at: Date.now() });
+            await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: numericOffsets, created_at: Date.now() });
             await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
-            await interaction.update({ content: `✅ **Active!** DMs set for ${event} on ${map}.`, components: [] });
+            await interaction.update({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
         }
         if (interaction.customId === 'server_mgmt_select') {
             if (interaction.user.id !== OWNER_ID) return;
@@ -492,15 +516,11 @@ client.on('interactionCreate', async interaction => {
         const subs = await getUserSubscriptions(interaction.user.id);
         const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal DM rotation alerts.');
         if (subs.length > 0) {
-            // FIXED: Updated format to multi-line [event] on [map] and removed bolding
             const list = subs.map(s => 
 `• ${getEmoji(s.event)} ${s.event} on ${s.map}
-└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === o)?.label).join(', ')}`
+└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`
             ).join('\n\n');
-            
             embed.addFields({ name: 'Active Alerts', value: list });
-            
-            // FIXED: Dropdown label updated to [event] on [map]
             const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
             await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
         } else {
