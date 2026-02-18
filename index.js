@@ -128,7 +128,6 @@ const client = new Client({
     partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.Channel]
 });
 
-// --- STABILITY: CATCH CLIENT ERRORS TO PREVENT CRASHING ---
 client.on(Events.Error, error => {
     console.error('⚠️ Discord Client Error:', error.message);
 });
@@ -272,10 +271,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                     const subs = await getUserSubscriptions(userId);
                     const discordUser = await client.users.fetch(userId).catch(() => null);
                     
-                    if (!discordUser) {
-                        console.warn(`[DM Engine] Could not fetch user ${userId}, skipping.`);
-                        continue;
-                    }
+                    if (!discordUser) continue;
                     if (subs.length === 0) continue;
 
                     for (const sub of subs) {
@@ -290,10 +286,9 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                         if (matchedEvent) {
                             const timeUntil = matchedEvent.startTime - now;
                             for (const offsetMs of sub.offsets) {
-                                if (typeof offsetMs !== "number") continue;
-
-                                if (timeUntil <= offsetMs && timeUntil > (offsetMs - 60000)) {
-                                    const alertKey = `dm_${userId}_${matchedEvent.map}_${matchedEvent.name}_${matchedEvent.startTime}_${offsetMs}`;
+                                const offsetNum = Number(offsetMs);
+                                if (timeUntil <= offsetNum && timeUntil > (offsetNum - 120000)) {
+                                    const alertKey = `dm_${userId}_${matchedEvent.map}_${matchedEvent.name}_${matchedEvent.startTime}_${offsetNum}`;
                                     const lockDoc = doc(db, 'artifacts', appId, 'public', 'data', 'sent_alerts', alertKey);
                                     
                                     const lockSnap = await getDoc(lockDoc);
@@ -320,7 +315,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
                         }
                     }
                 }
-            } catch (engErr) { console.error("DM engine runtime error:", engErr.message); }
+            } catch (engErr) { console.error("DM engine error:", engErr.message); }
         }
 
         const guildsToUpdate = targetGuildId ? [[targetGuildId, guildConfigs.get(targetGuildId)]] : Array.from(guildConfigs.entries());
@@ -432,11 +427,10 @@ const commandsData = [
     new SlashCommandBuilder().setName('quests').setDescription('Quest Logs').addStringOption(option => option.setName('name').setDescription('Quest').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('servers').setDescription('Admin Console').toJSON(),
     new SlashCommandBuilder().setName('subscribe').setDescription('Personal DM Alerts').toJSON(),
-    new SlashCommandBuilder().setName('test-dm').setDescription('Send a test DM to yourself to verify your rotation alerts are working (Owner Only)').toJSON()
+    new SlashCommandBuilder().setName('test-dm').setDescription('Verify your rotation alerts (Owner Only)').toJSON()
 ];
 
 client.on('interactionCreate', async interaction => {
-    // Wrap entire handler in try/catch to prevent process-killing errors
     try {
         if (interaction.isAutocomplete()) {
             const focused = interaction.options.getFocused().toLowerCase();
@@ -496,18 +490,13 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.commandName === 'test-dm') {
             if (interaction.user.id !== OWNER_ID) {
-                return interaction.reply({ content: "❌ Unauthorized: This command is restricted to the bot developer.", flags: [MessageFlags.Ephemeral] });
+                return interaction.reply({ content: "❌ Unauthorized: Developer Only.", flags: [MessageFlags.Ephemeral] });
             }
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }).catch(() => {});
 
-            // STABILITY: Acknowledge as fast as possible to avoid token expiration
-            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }).catch(err => {
-                console.error('[Test DM] Failed to defer:', err.message);
-            });
-
-            console.log(`[Test DM] Initiated by owner ${interaction.user.tag}`);
             const subs = await getUserSubscriptions(interaction.user.id);
             if (subs.length === 0) {
-                return interaction.editReply({ content: "❌ You have no active subscriptions to test. Use `/subscribe` first!" }).catch(() => {});
+                return interaction.editReply({ content: "❌ You have no active subscriptions to test." }).catch(() => {});
             }
 
             try {
@@ -515,37 +504,40 @@ client.on('interactionCreate', async interaction => {
                 const events = response.data?.data || [];
                 const now = Date.now();
 
-                let nextTriggerTime = null;
-                let nextTriggerInfo = "";
+                const embed = new EmbedBuilder().setTitle("🧪 Personal Alert System Diagnostic").setColor(0x3498db).setTimestamp();
+                let desc = `Verification for: **${interaction.user.tag}**.\n\n`;
 
                 for (const sub of subs) {
-                    const relevantEvents = events.filter(e => 
+                    const matchedEvent = events.find(e => 
                         e.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && 
                         e.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && 
                         e.startTime > now
                     );
 
-                    for (const ev of relevantEvents) {
-                        for (const offset of sub.offsets) {
-                            const triggerAt = ev.startTime - Number(offset);
+                    desc += `📡 **Sub:** ${getEmoji(sub.event)} ${sub.event} on ${sub.map}\n`;
+                    
+                    if (matchedEvent) {
+                        desc += `└ 🟢 **Found Upcoming:** <t:${Math.floor(matchedEvent.startTime/1000)}:F>\n`;
+                        sub.offsets.forEach(offset => {
+                            const triggerAt = matchedEvent.startTime - Number(offset);
+                            const label = notificationTimes.find(t => t.value === String(offset))?.label || `${offset}ms`;
                             if (triggerAt > now) {
-                                if (!nextTriggerTime || triggerAt < nextTriggerTime) {
-                                    nextTriggerTime = triggerAt;
-                                    nextTriggerInfo = `${getEmoji(ev.name)} **${ev.name}** on **${ev.map}**`;
-                                }
+                                desc += `   └ 🔔 **Next Alert (${label}):** <t:${Math.floor(triggerAt/1000)}:f> (<t:${Math.floor(triggerAt/1000)}:R>)\n`;
+                            } else {
+                                desc += `   └ ⚪ **Alert Passed (${label}):** <t:${Math.floor(triggerAt/1000)}:f>\n`;
                             }
-                        }
+                        });
+                    } else {
+                        desc += `└ ⚪ **No matching events found** in the current 3-hour schedule window.\n`;
                     }
+                    desc += `\n`;
                 }
 
-                const embed = new EmbedBuilder().setTitle("🧪 Personal Alert Test").setColor(0x3498db).setTimestamp();
-                let desc = `Verification for: **${interaction.user.tag}**.\n\nActive Subs: ${subs.length}\n`;
-                if (nextTriggerTime) desc += `\n🎯 **Next Alert:**\n${nextTriggerInfo}\nStarts <t:${Math.floor(nextTriggerTime/1000) + Math.round((nextTriggerTime - now)/1000)}:R>\n(Trigger: <t:${Math.floor(nextTriggerTime/1000)}:f>)`;
-                else desc += "\n⚠️ **No future triggers found** in the current 3-hour schedule.";
-
                 embed.setDescription(desc);
+                embed.setFooter({ text: "Use these timestamps to verify the DM Engine catches your alerts." });
+
                 await interaction.user.send({ embeds: [embed] });
-                await interaction.editReply({ content: "✅ Test DM sent!" }).catch(() => {});
+                await interaction.editReply({ content: "✅ Detailed diagnostic DM sent! Check your DMs for the full countdown schedule." }).catch(() => {});
             } catch (e) {
                 console.error(`[Test DM] Error:`, e.message);
                 await interaction.editReply({ content: `❌ Test failed: ${e.message}` }).catch(() => {});
@@ -556,7 +548,10 @@ client.on('interactionCreate', async interaction => {
             const subs = await getUserSubscriptions(interaction.user.id);
             const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal DM rotation alerts.');
             if (subs.length > 0) {
-                const list = subs.map(s => `• ${getEmoji(s.event)} ${s.event} on ${s.map}\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`).join('\n\n');
+                const list = subs.map(s => 
+`• ${getEmoji(s.event)} ${s.event} on ${s.map}
+└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`
+            ).join('\n\n');
                 embed.addFields({ name: 'Active Alerts', value: list });
                 const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
                 await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
@@ -576,9 +571,7 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ content: '🔄 Refreshing...', flags: [MessageFlags.Ephemeral] });
             await updateEvents(interaction.guildId, true);
         }
-    } catch (fatalInter) {
-        console.error('❌ Interaction handler failed:', fatalInter.message);
-    }
+    } catch (fatalInter) { console.error('❌ Interaction handler failed:', fatalInter.message); }
 });
 
 // DM Forwarding
@@ -599,23 +592,14 @@ client.once(Events.ClientReady, async () => {
         await ensureAuth(); 
         await loadAllConfigs(); 
         await refreshCaches();
-        
         const rest = new REST({ version: '10' }).setToken(TOKEN);
         try {
             console.log(`[Startup] Synchronizing Slash Commands...`);
             const guilds = client.guilds.cache;
-            for (const [gid, guild] of guilds) { 
-                try { 
-                    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); 
-                } catch (e) {
-                    console.warn(`[Startup] Command registration skip for ${guild.name} (${gid})`);
-                }
-            }
+            for (const [gid] of guilds) { try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); } catch (e) {} }
             await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
             console.log('[Startup] Slash command sync complete.');
-        } catch (e) {
-            console.error('[Startup] Slash command fatal sync error:', e.message);
-        }
+        } catch (e) { console.error('[Startup] Slash command fatal error:', e.message); }
         
         await updateEvents(); 
         setInterval(updateEvents, CHECK_INTERVAL);
@@ -623,10 +607,7 @@ client.once(Events.ClientReady, async () => {
     })();
 });
 
-// GLOBAL PROTECTION
-process.on('unhandledRejection', error => {
-    console.error('⚠️ Unhandled promise rejection:', error.message);
-});
+process.on('unhandledRejection', error => { console.error('⚠️ Unhandled promise rejection:', error.message); });
 
 client.login(TOKEN).catch(err => {
     console.error('❌ Discord Login Error:', err.message);
