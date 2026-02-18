@@ -67,7 +67,6 @@ if (missingVars.length > 0) {
 }
 
 // --- KOYEB HEALTH CHECK SERVER ---
-// We start this immediately to satisfy deployment platform checks
 const PORT = process.env.PORT || 8000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -75,7 +74,6 @@ http.createServer((req, res) => {
 }).listen(PORT, () => console.log(`Health check server listening on port ${PORT}`));
 
 // --- BOT SETTINGS ---
-// Added .trim() to prevent Bad Request errors caused by copy-paste whitespace
 const TOKEN = process.env.DISCORD_TOKEN.trim();
 const CLIENT_ID = process.env.CLIENT_ID.trim();
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
@@ -128,6 +126,11 @@ const client = new Client({
         GatewayIntentBits.DirectMessages 
     ],
     partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.Channel]
+});
+
+// --- STABILITY: CATCH CLIENT ERRORS TO PREVENT CRASHING ---
+client.on(Events.Error, error => {
+    console.error('⚠️ Discord Client Error:', error.message);
 });
 
 let arcCache = [], itemCache = [], traderCache = {}, traderItemsFlat = [], traderCategories = [], questCache = [];
@@ -433,140 +436,148 @@ const commandsData = [
 ];
 
 client.on('interactionCreate', async interaction => {
-    if (interaction.isAutocomplete()) {
-        const focused = interaction.options.getFocused().toLowerCase();
-        if (interaction.commandName === 'arc') await interaction.respond(arcCache.filter(a => a.name.toLowerCase().includes(focused)).slice(0, 25).map(a => ({ name: a.name, value: a.id })));
-        if (interaction.commandName === 'item') await interaction.respond(itemCache.filter(i => i.name.toLowerCase().includes(focused)).slice(0, 25).map(i => ({ name: i.name, value: i.id })));
-        if (interaction.commandName === 'traders') {
-            const results = [];
-            Object.keys(traderCache).forEach(n => { if (n.toLowerCase().includes(focused)) results.push({ name: `👤 ${n}`, value: `trader:${n}` }); });
-            await interaction.respond(results.slice(0, 25));
-        }
-        if (interaction.commandName === 'quests') await interaction.respond(questCache.filter(q => q.name.toLowerCase().includes(focused)).slice(0, 25).map(q => ({ name: q.name, value: q.id })));
-        return;
-    }
-
-    if (interaction.isStringSelectMenu()) {
-        if (interaction.customId === 'trader_item_select') {
-            const item = traderItemsFlat.find(i => i.id === interaction.values[0]);
-            if (item) await interaction.reply({ embeds: [buildTraderItemEmbed(item)], flags: [MessageFlags.Ephemeral] });
-        }
-        if (interaction.customId === 'sub_delete_select') {
-            await deleteDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', interaction.values[0]));
-            await interaction.update({ content: "✅ Subscription deleted.", embeds: [], components: [] });
-        }
-        if (interaction.customId === 'sub_create_map') {
-            const map = interaction.values[0];
-            const opts = Object.keys(eventEmojis).map(e => ({ label: e, value: e, emoji: eventEmojis[e] }));
-            const sel = new StringSelectMenuBuilder().setCustomId(`sub_create_event|${map}`).setPlaceholder('Select rotation...').addOptions(opts);
-            await interaction.update({ content: `📍 Map: **${map}**\nSelect rotation:`, components: [new ActionRowBuilder().addComponents(sel)] });
-        }
-        if (interaction.customId.startsWith('sub_create_event|')) {
-            const map = interaction.customId.split('|')[1];
-            const event = interaction.values[0];
-            const sel = new StringSelectMenuBuilder().setCustomId(`sub_create_times|${map}|${event}`).setPlaceholder('Select lead times...').setMinValues(1).setMaxValues(2).addOptions(notificationTimes);
-            await interaction.update({ content: `📍 Map: **${map}**\n🛸 Rotation: **${event}**\nSelect lead times:`, components: [new ActionRowBuilder().addComponents(sel)] });
-        }
-        if (interaction.customId.startsWith('sub_create_times|')) {
-            const [, map, event] = interaction.customId.split('|');
-            const numericOffsets = interaction.values.map(v => Number(v));
-            const subId = `${map}_${event}`.toLowerCase().replace(/\s/g, '_');
-            await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: numericOffsets, created_at: Date.now() });
-            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
-            await interaction.update({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
-        }
-        return;
-    }
-
-    if (interaction.isButton()) {
-        if (interaction.customId === 'sub_create_start') {
-            const opts = Object.keys(mapConfigs).map(m => ({ label: m, value: m }));
-            const sel = new StringSelectMenuBuilder().setCustomId('sub_create_map').setPlaceholder('Pick map...').addOptions(opts);
-            await interaction.reply({ content: "📝 **New Subscription**\nPick map:", components: [new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
+    // Wrap entire handler in try/catch to prevent process-killing errors
+    try {
+        if (interaction.isAutocomplete()) {
+            const focused = interaction.options.getFocused().toLowerCase();
+            if (interaction.commandName === 'arc') await interaction.respond(arcCache.filter(a => a.name.toLowerCase().includes(focused)).slice(0, 25).map(a => ({ name: a.name, value: a.id })));
+            if (interaction.commandName === 'item') await interaction.respond(itemCache.filter(i => i.name.toLowerCase().includes(focused)).slice(0, 25).map(i => ({ name: i.name, value: i.id })));
+            if (interaction.commandName === 'traders') {
+                const results = [];
+                Object.keys(traderCache).forEach(n => { if (n.toLowerCase().includes(focused)) results.push({ name: `👤 ${n}`, value: `trader:${n}` }); });
+                await interaction.respond(results.slice(0, 25));
+            }
+            if (interaction.commandName === 'quests') await interaction.respond(questCache.filter(q => q.name.toLowerCase().includes(focused)).slice(0, 25).map(q => ({ name: q.name, value: q.id })));
             return;
         }
-    }
 
-    if (!interaction.isChatInputCommand()) return;
-
-    if (interaction.commandName === 'test-dm') {
-        if (interaction.user.id !== OWNER_ID) {
-            return interaction.reply({ content: "❌ Unauthorized: This command is restricted to the bot developer.", flags: [MessageFlags.Ephemeral] });
+        if (interaction.isStringSelectMenu()) {
+            if (interaction.customId === 'trader_item_select') {
+                const item = traderItemsFlat.find(i => i.id === interaction.values[0]);
+                if (item) await interaction.reply({ embeds: [buildTraderItemEmbed(item)], flags: [MessageFlags.Ephemeral] });
+            }
+            if (interaction.customId === 'sub_delete_select') {
+                await deleteDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', interaction.values[0]));
+                await interaction.update({ content: "✅ Subscription deleted.", embeds: [], components: [] });
+            }
+            if (interaction.customId === 'sub_create_map') {
+                const map = interaction.values[0];
+                const opts = Object.keys(eventEmojis).map(e => ({ label: e, value: e, emoji: eventEmojis[e] }));
+                const sel = new StringSelectMenuBuilder().setCustomId(`sub_create_event|${map}`).setPlaceholder('Select rotation...').addOptions(opts);
+                await interaction.update({ content: `📍 Map: **${map}**\nSelect rotation:`, components: [new ActionRowBuilder().addComponents(sel)] });
+            }
+            if (interaction.customId.startsWith('sub_create_event|')) {
+                const map = interaction.customId.split('|')[1];
+                const event = interaction.values[0];
+                const sel = new StringSelectMenuBuilder().setCustomId(`sub_create_times|${map}|${event}`).setPlaceholder('Select lead times...').setMinValues(1).setMaxValues(2).addOptions(notificationTimes);
+                await interaction.update({ content: `📍 Map: **${map}**\n🛸 Rotation: **${event}**\nSelect lead times:`, components: [new ActionRowBuilder().addComponents(sel)] });
+            }
+            if (interaction.customId.startsWith('sub_create_times|')) {
+                const [, map, event] = interaction.customId.split('|');
+                const numericOffsets = interaction.values.map(v => Number(v));
+                const subId = `${map}_${event}`.toLowerCase().replace(/\s/g, '_');
+                await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: numericOffsets, created_at: Date.now() });
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
+                await interaction.update({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
+            }
+            return;
         }
 
-        await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-        console.log(`[Test DM] Initiated by owner ${interaction.user.tag}`);
-
-        const subs = await getUserSubscriptions(interaction.user.id);
-        if (subs.length === 0) {
-            return interaction.editReply({ content: "❌ You have no active subscriptions to test. Use `/subscribe` first!" });
+        if (interaction.isButton()) {
+            if (interaction.customId === 'sub_create_start') {
+                const opts = Object.keys(mapConfigs).map(m => ({ label: m, value: m }));
+                const sel = new StringSelectMenuBuilder().setCustomId('sub_create_map').setPlaceholder('Pick map...').addOptions(opts);
+                await interaction.reply({ content: "📝 **New Subscription**\nPick map:", components: [new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
+                return;
+            }
         }
 
-        try {
-            const response = await axios.get(API_URL);
-            const events = response.data?.data || [];
-            const now = Date.now();
+        if (!interaction.isChatInputCommand()) return;
 
-            let nextTriggerTime = null;
-            let nextTriggerInfo = "";
+        if (interaction.commandName === 'test-dm') {
+            if (interaction.user.id !== OWNER_ID) {
+                return interaction.reply({ content: "❌ Unauthorized: This command is restricted to the bot developer.", flags: [MessageFlags.Ephemeral] });
+            }
 
-            for (const sub of subs) {
-                const relevantEvents = events.filter(e => 
-                    e.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && 
-                    e.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && 
-                    e.startTime > now
-                );
+            // STABILITY: Acknowledge as fast as possible to avoid token expiration
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] }).catch(err => {
+                console.error('[Test DM] Failed to defer:', err.message);
+            });
 
-                for (const ev of relevantEvents) {
-                    for (const offset of sub.offsets) {
-                        const triggerAt = ev.startTime - Number(offset);
-                        if (triggerAt > now) {
-                            if (!nextTriggerTime || triggerAt < nextTriggerTime) {
-                                nextTriggerTime = triggerAt;
-                                nextTriggerInfo = `${getEmoji(ev.name)} **${ev.name}** on **${ev.map}**`;
+            console.log(`[Test DM] Initiated by owner ${interaction.user.tag}`);
+            const subs = await getUserSubscriptions(interaction.user.id);
+            if (subs.length === 0) {
+                return interaction.editReply({ content: "❌ You have no active subscriptions to test. Use `/subscribe` first!" }).catch(() => {});
+            }
+
+            try {
+                const response = await axios.get(API_URL);
+                const events = response.data?.data || [];
+                const now = Date.now();
+
+                let nextTriggerTime = null;
+                let nextTriggerInfo = "";
+
+                for (const sub of subs) {
+                    const relevantEvents = events.filter(e => 
+                        e.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && 
+                        e.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() && 
+                        e.startTime > now
+                    );
+
+                    for (const ev of relevantEvents) {
+                        for (const offset of sub.offsets) {
+                            const triggerAt = ev.startTime - Number(offset);
+                            if (triggerAt > now) {
+                                if (!nextTriggerTime || triggerAt < nextTriggerTime) {
+                                    nextTriggerTime = triggerAt;
+                                    nextTriggerInfo = `${getEmoji(ev.name)} **${ev.name}** on **${ev.map}**`;
+                                }
                             }
                         }
                     }
                 }
+
+                const embed = new EmbedBuilder().setTitle("🧪 Personal Alert Test").setColor(0x3498db).setTimestamp();
+                let desc = `Verification for: **${interaction.user.tag}**.\n\nActive Subs: ${subs.length}\n`;
+                if (nextTriggerTime) desc += `\n🎯 **Next Alert:**\n${nextTriggerInfo}\nStarts <t:${Math.floor(nextTriggerTime/1000) + Math.round((nextTriggerTime - now)/1000)}:R>\n(Trigger: <t:${Math.floor(nextTriggerTime/1000)}:f>)`;
+                else desc += "\n⚠️ **No future triggers found** in the current 3-hour schedule.";
+
+                embed.setDescription(desc);
+                await interaction.user.send({ embeds: [embed] });
+                await interaction.editReply({ content: "✅ Test DM sent!" }).catch(() => {});
+            } catch (e) {
+                console.error(`[Test DM] Error:`, e.message);
+                await interaction.editReply({ content: `❌ Test failed: ${e.message}` }).catch(() => {});
             }
-
-            const embed = new EmbedBuilder().setTitle("🧪 Personal Alert Test").setColor(0x3498db).setTimestamp();
-            let desc = `Verification for: **${interaction.user.tag}**.\n\nActive Subs: ${subs.length}\n`;
-            if (nextTriggerTime) desc += `\n🎯 **Next Alert:**\n${nextTriggerInfo}\nStarts <t:${Math.floor(nextTriggerTime/1000) + Math.round((nextTriggerTime - now)/1000)}:R>\n(Trigger: <t:${Math.floor(nextTriggerTime/1000)}:f>)`;
-            else desc += "\n⚠️ **No future triggers found** in the current 3-hour schedule.";
-
-            embed.setDescription(desc);
-            await interaction.user.send({ embeds: [embed] });
-            await interaction.editReply({ content: "✅ Test DM sent!" });
-        } catch (e) {
-            console.error(`[Test DM] Error:`, e.message);
-            await interaction.editReply({ content: `❌ Test failed: ${e.message}` });
         }
-    }
 
-    if (interaction.commandName === 'subscribe') {
-        const subs = await getUserSubscriptions(interaction.user.id);
-        const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal DM rotation alerts.');
-        if (subs.length > 0) {
-            const list = subs.map(s => `• ${getEmoji(s.event)} ${s.event} on ${s.map}\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`).join('\n\n');
-            embed.addFields({ name: 'Active Alerts', value: list });
-            const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
-            await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
-        } else {
-            embed.addFields({ name: 'Status', value: 'No active personal subscriptions found.' });
-            await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success))], flags: [MessageFlags.Ephemeral] });
+        if (interaction.commandName === 'subscribe') {
+            const subs = await getUserSubscriptions(interaction.user.id);
+            const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal DM rotation alerts.');
+            if (subs.length > 0) {
+                const list = subs.map(s => `• ${getEmoji(s.event)} ${s.event} on ${s.map}\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`).join('\n\n');
+                embed.addFields({ name: 'Active Alerts', value: list });
+                const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
+                await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
+            } else {
+                embed.addFields({ name: 'Status', value: 'No active personal subscriptions found.' });
+                await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success))], flags: [MessageFlags.Ephemeral] });
+            }
         }
-    }
 
-    if (interaction.commandName === 'setup') {
-        const c = interaction.options.getChannel('channel');
-        guildConfigs.set(interaction.guildId, { channelId: c.id, activeAlerts: [], alertedEventKeys: [], messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null } });
-        await interaction.reply({ content: "✅ Setup.", flags: [MessageFlags.Ephemeral] });
-        await updateEvents(interaction.guildId, true);
-    }
-    if (interaction.commandName === 'update') {
-        await interaction.reply({ content: '🔄 Refreshing...', flags: [MessageFlags.Ephemeral] });
-        await updateEvents(interaction.guildId, true);
+        if (interaction.commandName === 'setup') {
+            const c = interaction.options.getChannel('channel');
+            guildConfigs.set(interaction.guildId, { channelId: c.id, activeAlerts: [], alertedEventKeys: [], messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null } });
+            await interaction.reply({ content: "✅ Setup.", flags: [MessageFlags.Ephemeral] });
+            await updateEvents(interaction.guildId, true);
+        }
+        if (interaction.commandName === 'update') {
+            await interaction.reply({ content: '🔄 Refreshing...', flags: [MessageFlags.Ephemeral] });
+            await updateEvents(interaction.guildId, true);
+        }
+    } catch (fatalInter) {
+        console.error('❌ Interaction handler failed:', fatalInter.message);
     }
 });
 
@@ -584,7 +595,6 @@ client.once(Events.ClientReady, async () => {
     console.log(`[Startup] Logged in as ${client.user.tag}`);
     client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
 
-    // Non-blocking initialization to satisfy health checks immediately
     (async () => {
         await ensureAuth(); 
         await loadAllConfigs(); 
@@ -592,13 +602,13 @@ client.once(Events.ClientReady, async () => {
         
         const rest = new REST({ version: '10' }).setToken(TOKEN);
         try {
-            console.log(`[Startup] Synchronizing Slash Commands for ${client.guilds.cache.size} guilds...`);
+            console.log(`[Startup] Synchronizing Slash Commands...`);
             const guilds = client.guilds.cache;
             for (const [gid, guild] of guilds) { 
                 try { 
                     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); 
                 } catch (e) {
-                    console.warn(`[Startup] Could not register commands for guild ${guild.name} (${gid}): ${e.message}`);
+                    console.warn(`[Startup] Command registration skip for ${guild.name} (${gid})`);
                 }
             }
             await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
@@ -613,8 +623,9 @@ client.once(Events.ClientReady, async () => {
     })();
 });
 
+// GLOBAL PROTECTION
 process.on('unhandledRejection', error => {
-    console.error('⚠️ Unhandled promise rejection:', error.message, error.stack);
+    console.error('⚠️ Unhandled promise rejection:', error.message);
 });
 
 client.login(TOKEN).catch(err => {
