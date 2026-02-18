@@ -67,6 +67,7 @@ if (missingVars.length > 0) {
 }
 
 // --- KOYEB HEALTH CHECK SERVER ---
+// We start this immediately to satisfy deployment platform checks
 const PORT = process.env.PORT || 8000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -74,8 +75,9 @@ http.createServer((req, res) => {
 }).listen(PORT, () => console.log(`Health check server listening on port ${PORT}`));
 
 // --- BOT SETTINGS ---
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
+// Added .trim() to prevent Bad Request errors caused by copy-paste whitespace
+const TOKEN = process.env.DISCORD_TOKEN.trim();
+const CLIENT_ID = process.env.CLIENT_ID.trim();
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
 const ARCS_API_URL = 'https://metaforge.app/api/arc-raiders/arcs';
 const ITEMS_API_URL = 'https://metaforge.app/api/arc-raiders/items?limit=1000';
@@ -258,7 +260,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false) {
         const alertWindow = now + (60 * 60 * 1000); 
         const scheduleWindow = now + (3 * 60 * 60 * 1000); 
 
-        // --- GLOBAL DM ENGINE ---
+        // GLOBAL DM ENGINE
         if (!targetGuildId) {
             try {
                 const activeUsersSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'subscription_users'));
@@ -488,7 +490,6 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === 'test-dm') {
-        // OWNER ONLY CHECK
         if (interaction.user.id !== OWNER_ID) {
             return interaction.reply({ content: "❌ Unauthorized: This command is restricted to the bot developer.", flags: [MessageFlags.Ephemeral] });
         }
@@ -509,7 +510,6 @@ client.on('interactionCreate', async interaction => {
             let nextTriggerTime = null;
             let nextTriggerInfo = "";
 
-            // Calculate the absolute next notification that should occur
             for (const sub of subs) {
                 const relevantEvents = events.filter(e => 
                     e.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() && 
@@ -530,29 +530,16 @@ client.on('interactionCreate', async interaction => {
                 }
             }
 
-            const embed = new EmbedBuilder()
-                .setTitle("🧪 Personal Alert System Test")
-                .setColor(0x3498db)
-                .setTimestamp();
-
-            let desc = `This is a verification DM for your account: **${interaction.user.tag}**.\n\n`;
-            desc += `**Active Subs Detected:** ${subs.length}\n`;
-            
-            if (nextTriggerTime) {
-                desc += `\n🎯 **Next Scheduled Notification:**\n${nextTriggerInfo}\nStarts <t:${Math.floor(nextTriggerTime/1000) + Math.round((nextTriggerTime - now)/1000)}:R>\n(Bot will DM you at <t:${Math.floor(nextTriggerTime/1000)}:f>)`;
-            } else {
-                desc += "\n⚠️ **No future alerts found:** No events matching your subs are currently in the 3-hour API schedule window.";
-            }
+            const embed = new EmbedBuilder().setTitle("🧪 Personal Alert Test").setColor(0x3498db).setTimestamp();
+            let desc = `Verification for: **${interaction.user.tag}**.\n\nActive Subs: ${subs.length}\n`;
+            if (nextTriggerTime) desc += `\n🎯 **Next Alert:**\n${nextTriggerInfo}\nStarts <t:${Math.floor(nextTriggerTime/1000) + Math.round((nextTriggerTime - now)/1000)}:R>\n(Trigger: <t:${Math.floor(nextTriggerTime/1000)}:f>)`;
+            else desc += "\n⚠️ **No future triggers found** in the current 3-hour schedule.";
 
             embed.setDescription(desc);
-            embed.setFooter({ text: "If you can see this, your DM permissions and subscription data are correct." });
-
             await interaction.user.send({ embeds: [embed] });
-            await interaction.editReply({ content: "✅ Test DM sent successfully! Check your DMs for details on your next alert." });
-            console.log(`[Test DM] Success for ${interaction.user.tag}. Next alert: ${nextTriggerTime ? new Date(nextTriggerTime).toISOString() : 'None'}`);
-
+            await interaction.editReply({ content: "✅ Test DM sent!" });
         } catch (e) {
-            console.error(`[Test DM] Fatal Error:`, e.message);
+            console.error(`[Test DM] Error:`, e.message);
             await interaction.editReply({ content: `❌ Test failed: ${e.message}` });
         }
     }
@@ -561,10 +548,7 @@ client.on('interactionCreate', async interaction => {
         const subs = await getUserSubscriptions(interaction.user.id);
         const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal DM rotation alerts.');
         if (subs.length > 0) {
-            const list = subs.map(s => 
-`• ${getEmoji(s.event)} ${s.event} on ${s.map}
-└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`
-            ).join('\n\n');
+            const list = subs.map(s => `• ${getEmoji(s.event)} ${s.event} on ${s.map}\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`).join('\n\n');
             embed.addFields({ name: 'Active Alerts', value: list });
             const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
             await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)], flags: [MessageFlags.Ephemeral] });
@@ -597,20 +581,43 @@ client.on('messageCreate', async m => {
 });
 
 client.once(Events.ClientReady, async () => {
+    console.log(`[Startup] Logged in as ${client.user.tag}`);
     client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
-    await ensureAuth(); await loadAllConfigs(); await refreshCaches();
-    const rest = new REST({ version: '10' }).setToken(TOKEN);
-    try {
-        const guilds = client.guilds.cache;
-        for (const [gid] of guilds) { try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); } catch (err) {} }
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
-    } catch (e) {}
-    updateEvents(); setInterval(updateEvents, CHECK_INTERVAL);
+
+    // Non-blocking initialization to satisfy health checks immediately
+    (async () => {
+        await ensureAuth(); 
+        await loadAllConfigs(); 
+        await refreshCaches();
+        
+        const rest = new REST({ version: '10' }).setToken(TOKEN);
+        try {
+            console.log(`[Startup] Synchronizing Slash Commands for ${client.guilds.cache.size} guilds...`);
+            const guilds = client.guilds.cache;
+            for (const [gid, guild] of guilds) { 
+                try { 
+                    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); 
+                } catch (e) {
+                    console.warn(`[Startup] Could not register commands for guild ${guild.name} (${gid}): ${e.message}`);
+                }
+            }
+            await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
+            console.log('[Startup] Slash command sync complete.');
+        } catch (e) {
+            console.error('[Startup] Slash command fatal sync error:', e.message);
+        }
+        
+        await updateEvents(); 
+        setInterval(updateEvents, CHECK_INTERVAL);
+        console.log('[Startup] Bot logic loop started.');
+    })();
 });
 
-// GLOBAL PROTECTION: Prevent bot from crashing on unhandled Discord or API errors
 process.on('unhandledRejection', error => {
-    console.error('Unhandled promise rejection:', error);
+    console.error('⚠️ Unhandled promise rejection:', error.message, error.stack);
 });
 
-client.login(TOKEN).catch(console.error);
+client.login(TOKEN).catch(err => {
+    console.error('❌ Discord Login Error:', err.message);
+    process.exit(1);
+});
