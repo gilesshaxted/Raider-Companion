@@ -10,6 +10,8 @@ const {
     Events,
     ActionRowBuilder, 
     StringSelectMenuBuilder,
+    ChannelSelectMenuBuilder,
+    ChannelType,
     GuildScheduledEventPrivacyLevel,
     GuildScheduledEventEntityType,
     ActivityType,
@@ -124,7 +126,7 @@ const client = new Client({
         GatewayIntentBits.GuildMessageReactions,
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.DirectMessages,
-        GatewayIntentBits.GuildPresences // Added for "Active Members" calculation
+        GatewayIntentBits.GuildPresences
     ],
     partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.Channel]
 });
@@ -174,6 +176,9 @@ async function loadAllConfigs() {
                 const data = doc.data();
                 if (!data.alertedEventKeys) data.alertedEventKeys = [];
                 if (!data.activeAlerts) data.activeAlerts = [];
+                // Defaults for new flags
+                if (data.scheduledEventsEnabled === undefined) data.scheduledEventsEnabled = true;
+                if (data.rolePingsEnabled === undefined) data.rolePingsEnabled = true;
                 guildConfigs.set(guildId, data);
             }
         });
@@ -318,35 +323,37 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                     config.activeAlerts = freshAlerts;
                 }
 
-                // 2. DISCORD SCHEDULED EVENTS SYNC
-                let existingScheduledEvents = [];
-                try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
-                const seenSlots = new Set();
-                for (const se of existingScheduledEvents.values()) {
-                    const key = `${se.scheduledStartTimestamp}_${se.entityMetadata?.location}`;
-                    if (seenSlots.has(key)) { try { await se.delete(); } catch (e) {} } else { seenSlots.add(key); }
-                }
+                // 2. DISCORD SCHEDULED EVENTS SYNC (If Enabled)
+                if (config.scheduledEventsEnabled !== false) {
+                    let existingScheduledEvents = [];
+                    try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
+                    const seenSlots = new Set();
+                    for (const se of existingScheduledEvents.values()) {
+                        const key = `${se.scheduledStartTimestamp}_${se.entityMetadata?.location}`;
+                        if (seenSlots.has(key)) { try { await se.delete(); } catch (e) {} } else { seenSlots.add(key); }
+                    }
 
-                const scorableEvents = events.filter(e => e.startTime > now && e.startTime <= scheduleWindow);
-                const groupedEvents = {};
-                scorableEvents.forEach(e => {
-                    const groupKey = `${e.map}_${e.startTime}`;
-                    if (!groupedEvents[groupKey]) groupedEvents[groupKey] = [];
-                    groupedEvents[groupKey].push(e);
-                });
+                    const scorableEvents = events.filter(e => e.startTime > now && e.startTime <= scheduleWindow);
+                    const groupedEvents = {};
+                    scorableEvents.forEach(e => {
+                        const groupKey = `${e.map}_${e.startTime}`;
+                        if (!groupedEvents[groupKey]) groupedEvents[groupKey] = [];
+                        groupedEvents[groupKey].push(e);
+                    });
 
-                for (const groupKey in groupedEvents) {
-                    const group = groupedEvents[groupKey];
-                    const first = group[0];
-                    const existingEvent = existingScheduledEvents.find(se => se.entityMetadata?.location === first.map && Math.abs(se.scheduledStartTimestamp - first.startTime) < 120000);
-                    const finalName = `${group.map(ev => `${getEmoji(ev.name)} ${ev.name}`).join(' & ')} (${first.map})`.substring(0, 100);
-                    const finalDesc = `Upcoming rotation group on ${first.map}:\n${group.map(ev => `• ${getEmoji(ev.name)} **${ev.name}**`).join('\n')}`;
-                    const mapKey = Object.keys(mapConfigs).find(k => k.toLowerCase().replace(/\s/g, '') === first.map?.toLowerCase().replace(/\s/g, ''));
-                    const dataURI = mapKey ? getLocalImageAsDataURI(mapConfigs[mapKey].fileName) : null;
+                    for (const groupKey in groupedEvents) {
+                        const group = groupedEvents[groupKey];
+                        const first = group[0];
+                        const existingEvent = existingScheduledEvents.find(se => se.entityMetadata?.location === first.map && Math.abs(se.scheduledStartTimestamp - first.startTime) < 120000);
+                        const finalName = `${group.map(ev => `${getEmoji(ev.name)} ${ev.name}`).join(' & ')} (${first.map})`.substring(0, 100);
+                        const finalDesc = `Upcoming rotation group on ${first.map}:\n${group.map(ev => `• ${getEmoji(ev.name)} **${ev.name}**`).join('\n')}`;
+                        const mapKey = Object.keys(mapConfigs).find(k => k.toLowerCase().replace(/\s/g, '') === first.map?.toLowerCase().replace(/\s/g, ''));
+                        const dataURI = mapKey ? getLocalImageAsDataURI(mapConfigs[mapKey].fileName) : null;
 
-                    if (existingEvent) { try { await existingEvent.edit({ name: finalName, description: finalDesc, image: dataURI }); } catch (err) {} }
-                    else {
-                        try { await guild.scheduledEvents.create({ name: finalName, scheduledStartTime: new Date(first.startTime), scheduledEndTime: new Date(Math.max(...group.map(ev => ev.endTime))), privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly, entityType: GuildScheduledEventEntityType.External, entityMetadata: { location: first.map }, image: dataURI, description: finalDesc }); } catch (err) {}
+                        if (existingEvent) { try { await existingEvent.edit({ name: finalName, description: finalDesc, image: dataURI }); } catch (err) {} }
+                        else {
+                            try { await guild.scheduledEvents.create({ name: finalName, scheduledStartTime: new Date(first.startTime), scheduledEndTime: new Date(Math.max(...group.map(ev => ev.endTime))), privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly, entityType: GuildScheduledEventEntityType.External, entityMetadata: { location: first.map }, image: dataURI, description: finalDesc }); } catch (err) {}
+                        }
                     }
                 }
 
@@ -378,12 +385,12 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                 const summarySent = await syncMessage(channel, config, 'Summary', summary);
                 if (summarySent && forceNewMessages) { for (const emoji of Object.values(eventEmojis)) { try { await summarySent.react(emoji); } catch (e) {} } }
 
-                // 5. ROLE PINGS (SENT LAST)
-                for (const groupKey in groupedEvents) {
-                    const group = groupedEvents[groupKey];
-                    for (const e of group) {
+                // 5. ROLE PINGS (SENT LAST & If Enabled)
+                if (config.rolePingsEnabled !== false) {
+                    const scorableForPing = events.filter(e => e.startTime > now && e.startTime <= alertWindow);
+                    for (const e of scorableForPing) {
                         const alertKey = `${e.name}_${e.map}_${e.startTime}`;
-                        if (e.startTime <= alertWindow && !config.alertedEventKeys.includes(alertKey)) {
+                        if (!config.alertedEventKeys.includes(alertKey)) {
                             const role = await getOrCreateEventRole(guild, e.name);
                             const roleMention = role ? `<@&${role.id}>` : `**${e.name}**`;
                             const alertSent = await channel.send({ content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!` });
@@ -414,6 +421,49 @@ function buildTraderItemEmbed(item) {
     return new EmbedBuilder().setTitle(`📦 Item: ${item.name}`).setDescription(item.description || "No info.").setColor(rarityColors[item.rarity] || 0x5865F2).setThumbnail(item.icon).addFields({ name: 'Trader Price', value: `🪙 ${item.trader_price.toLocaleString()}`, inline: true }, { name: 'Category', value: item.item_type, inline: true }).setTimestamp();
 }
 
+// --- SETUP HELPERS ---
+function generateSetupEmbed(guild, config) {
+    return new EmbedBuilder()
+        .setTitle(`⚙️ Tactical Setup: ${guild.name}`)
+        .setColor(0x5865F2)
+        .setThumbnail(guild.iconURL())
+        .setDescription("Configure how Raider Companion operates in this server.")
+        .addFields(
+            { name: "📍 Tactical Channel", value: config.channelId ? `<#${config.channelId}>` : "❌ *Not Configured*", inline: true },
+            { name: "📅 Discord Events", value: config.scheduledEventsEnabled !== false ? "✅ Enabled" : "❌ Disabled", inline: true },
+            { name: "🔔 Role Pings", value: config.rolePingsEnabled !== false ? "✅ Enabled" : "❌ Disabled", inline: true }
+        )
+        .setFooter({ text: "Use the menu and buttons below to adjust settings." })
+        .setTimestamp();
+}
+
+function generateSetupComponents(config) {
+    const channelSelect = new ActionRowBuilder().addComponents(
+        new ChannelSelectMenuBuilder()
+            .setCustomId('setup_channel_select')
+            .setPlaceholder('Select tactical channel...')
+            .addChannelTypes(ChannelType.GuildText)
+    );
+
+    const toggleRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('setup_toggle_events')
+            .setLabel(config.scheduledEventsEnabled !== false ? 'Disable Events Tab' : 'Enable Events Tab')
+            .setStyle(config.scheduledEventsEnabled !== false ? ButtonStyle.Danger : ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId('setup_toggle_pings')
+            .setLabel(config.rolePingsEnabled !== false ? 'Disable Role Pings' : 'Enable Role Pings')
+            .setStyle(config.rolePingsEnabled !== false ? ButtonStyle.Danger : ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId('setup_create_roles')
+            .setLabel('Create Rotation Roles')
+            .setStyle(ButtonStyle.Secondary)
+            .setEmoji('🎭')
+    );
+
+    return [channelSelect, toggleRow];
+}
+
 // --- PAGINATED HELP DATA ---
 const helpPages = [
     {
@@ -436,7 +486,7 @@ const helpPages = [
         title: "🛠️ Server Administration",
         description: "Tools for Discord staff to manage raider companion within their server.",
         fields: [
-            { name: "Setup", value: "`/setup [channel]` - Designate a tactical channel where I will post live map guides and rotation pings." },
+            { name: "Setup", value: "`/setup` - Open the tactical configuration dashboard." },
             { name: "Maintenance", value: "`/update` - Forces a full purge and repost of all intel embeds and notification pings to ensure everything is current." }
         ]
     },
@@ -479,7 +529,7 @@ function generateHelpComponents(pageIndex) {
 }
 
 const commandsData = [
-    new SlashCommandBuilder().setName('setup').setDescription('Configure tactical channel').addChannelOption(o => o.setName('channel').setDescription('Channel').setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
+    new SlashCommandBuilder().setName('setup').setDescription('Open the tactical configuration dashboard').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
     new SlashCommandBuilder().setName('update').setDescription('Force refresh all embeds/pings').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
     new SlashCommandBuilder().setName('arc').setDescription('ARC Intel').addStringOption(o => o.setName('unit').setDescription('Unit').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('item').setDescription('Item Search').addStringOption(o => o.setName('name').setDescription('Item').setRequired(true).setAutocomplete(true)).toJSON(),
@@ -502,6 +552,20 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
+        if (interaction.isChannelSelectMenu()) {
+            if (interaction.customId === 'setup_channel_select') {
+                const channel = interaction.channels.first();
+                const guildId = interaction.guildId;
+                let config = guildConfigs.get(guildId) || { activeAlerts: [], alertedEventKeys: [], messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null } };
+                config.channelId = channel.id;
+                guildConfigs.set(guildId, config);
+                await saveGuildConfig(guildId);
+                await interaction.update({ embeds: [generateSetupEmbed(interaction.guild, config)], components: generateSetupComponents(config) });
+                await updateEvents(guildId, true, true);
+            }
+            return;
+        }
+
         if (interaction.isStringSelectMenu()) {
             if (interaction.customId === 'trader_item_select') {
                 const i = traderItemsFlat.find(it => it.id === interaction.values[0]);
@@ -521,50 +585,48 @@ client.on('interactionCreate', async interaction => {
             }
             if (interaction.customId.startsWith('sub_create_times|')) {
                 const [, map, event] = interaction.customId.split('|');
+                const numericOffsets = interaction.values.map(Number);
                 const subId = `${map}_${event}`.toLowerCase().replace(/\s/g, '_');
-                await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: interaction.values.map(Number), created_at: Date.now() });
+                await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: numericOffsets, created_at: Date.now() });
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
                 await interaction.update({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
             }
             if (interaction.customId === 'server_mgmt_select') {
                 if (interaction.user.id !== OWNER_ID) return;
-                
                 const guild = await client.guilds.fetch(interaction.values[0]).catch(() => null);
                 if (!guild) return interaction.reply({ content: "❌ Server not accessible.", flags: [MessageFlags.Ephemeral] });
-                
                 const owner = await guild.fetchOwner().catch(() => null);
                 const botJoinedAt = guild.members.me?.joinedTimestamp;
-                
-                // Calculate "Active" members (non-offline)
-                // Note: guild.members.cache is only fully populated if the bot has fetched members previously
-                // We attempt to get the size of cached presences that are not offline
                 const activeMembers = guild.members.cache.filter(m => m.presence && m.presence.status !== 'offline').size;
-
-                const embed = new EmbedBuilder()
-                    .setTitle(`🛡️ Server Intelligence: ${guild.name}`)
-                    .setThumbnail(guild.iconURL({ dynamic: true }))
-                    .setColor(0x5865F2)
-                    .addFields(
-                        { name: '👤 Owner', value: `${owner?.user.tag || "Unknown"} (\`${owner?.id || "N/A"}\`)`, inline: true },
-                        { name: '🆔 Server ID', value: `\`${guild.id}\``, inline: true },
-                        { name: '📅 Bot Joined', value: botJoinedAt ? `<t:${Math.floor(botJoinedAt / 1000)}:f> (<t:${Math.floor(botJoinedAt / 1000)}:R>)` : "Unknown", inline: false },
-                        { name: '👥 Member Count', value: `Total: **${guild.memberCount.toLocaleString()}**\nActive: **${activeMembers.toLocaleString()}**`, inline: true }
-                    )
-                    .setTimestamp();
-
-                const row = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Create Invite').setStyle(ButtonStyle.Primary),
-                    new ButtonBuilder().setCustomId(`srv_dm_${owner?.id || guild.id}`).setLabel('DM Owner').setStyle(ButtonStyle.Secondary),
-                    new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave Server').setStyle(ButtonStyle.Danger),
-                    new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block/Blacklist').setStyle(ButtonStyle.Danger)
-                );
-
+                const embed = new EmbedBuilder().setTitle(`🛡️ Server Intelligence: ${guild.name}`).setThumbnail(guild.iconURL({ dynamic: true })).setColor(0x5865F2).addFields({ name: '👤 Owner', value: `${owner?.user.tag || "Unknown"} (\`${owner?.id || "N/A"}\`)`, inline: true }, { name: '🆔 Server ID', value: `\`${guild.id}\``, inline: true }, { name: '📅 Bot Joined', value: botJoinedAt ? `<t:${Math.floor(botJoinedAt / 1000)}:f> (<t:${Math.floor(botJoinedAt / 1000)}:R>)` : "Unknown", inline: false }, { name: '👥 Member Count', value: `Total: **${guild.memberCount.toLocaleString()}**\nActive: **${activeMembers.toLocaleString()}**`, inline: true }).setTimestamp();
+                const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Create Invite').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`srv_dm_${owner?.id || guild.id}`).setLabel('DM Owner').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave Server').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block/Blacklist').setStyle(ButtonStyle.Danger));
                 await interaction.reply({ embeds: [embed], components: [row], flags: [MessageFlags.Ephemeral] });
             }
             return;
         }
 
         if (interaction.isButton()) {
+            if (interaction.customId === 'setup_toggle_events') {
+                const guildId = interaction.guildId;
+                let config = guildConfigs.get(guildId);
+                config.scheduledEventsEnabled = config.scheduledEventsEnabled === false ? true : false;
+                guildConfigs.set(guildId, config);
+                await saveGuildConfig(guildId);
+                await interaction.update({ embeds: [generateSetupEmbed(interaction.guild, config)], components: generateSetupComponents(config) });
+            }
+            if (interaction.customId === 'setup_toggle_pings') {
+                const guildId = interaction.guildId;
+                let config = guildConfigs.get(guildId);
+                config.rolePingsEnabled = config.rolePingsEnabled === false ? true : false;
+                guildConfigs.set(guildId, config);
+                await saveGuildConfig(guildId);
+                await interaction.update({ embeds: [generateSetupEmbed(interaction.guild, config)], components: generateSetupComponents(config) });
+            }
+            if (interaction.customId === 'setup_create_roles') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                for (const eventName of Object.keys(eventEmojis)) { await getOrCreateEventRole(interaction.guild, eventName); }
+                await interaction.editReply({ content: "✅ All rotation roles created/verified." });
+            }
             if (interaction.customId === 'sub_create_start') {
                 const opts = Object.keys(mapConfigs).map(m => ({ label: m, value: m }));
                 await interaction.reply({ content: "📝 **New Alert**\nPick map:", components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sub_create_map').setPlaceholder('Pick...').addOptions(opts))], flags: [MessageFlags.Ephemeral] });
@@ -618,6 +680,11 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ content: "👤 **Management Console**", components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('server_mgmt_select').setPlaceholder('Select...').addOptions(guilds.slice(0, 25)))], flags: [MessageFlags.Ephemeral] });
         }
 
+        if (interaction.commandName === 'setup') {
+            const config = guildConfigs.get(interaction.guildId) || { channelId: null, scheduledEventsEnabled: true, rolePingsEnabled: true };
+            await interaction.reply({ embeds: [generateSetupEmbed(interaction.guild, config)], components: generateSetupComponents(config), flags: [MessageFlags.Ephemeral] });
+        }
+
         if (interaction.commandName === 'help') {
             await interaction.reply({ embeds: [generateHelpEmbed(0)], components: generateHelpComponents(0), flags: [MessageFlags.Ephemeral] });
         }
@@ -665,12 +732,6 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        if (interaction.commandName === 'setup') {
-            const c = interaction.options.getChannel('channel');
-            guildConfigs.set(interaction.guildId, { channelId: c.id, activeAlerts: [], alertedEventKeys: [], messageIds: { 'Dam': null, 'Buried City': null, 'Blue Gate': null, 'Spaceport': null, 'Stella Montis': null, 'Summary': null } });
-            await interaction.reply({ content: "✅ Setup.", flags: [MessageFlags.Ephemeral] });
-            await updateEvents(interaction.guildId, true, true);
-        }
         if (interaction.commandName === 'update') {
             await interaction.reply({ content: '🔄 Refreshing all data, embeds, and active pings...', flags: [MessageFlags.Ephemeral] });
             await updateEvents(interaction.guildId, true, true); 
