@@ -283,7 +283,8 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                                     const lockDoc = doc(db, 'artifacts', appId, 'public', 'data', 'sent_alerts', alertKey);
                                     const lockSnap = await getDoc(lockDoc);
                                     if (!lockSnap.exists()) {
-                                        const embed = new EmbedBuilder().setTitle("🔔 Rotation Starting").setDescription(`${getEmoji(matchedEvent.name)} **${matchedEvent.name}** on **${matchedEvent.map}** starts <t:${Math.floor(matchedEvent.startTime/1000)}:R>!`).setColor(0x00AE86).setTimestamp();
+                                        const embed = new EmbedBuilder().setTitle("🔔 Rotation Starting").setDescription(`${getEmoji(matchedEvent.name)} **${matchedEvent.name}** on **${matchedEvent.map}** starts <t:${Math.floor(matchedEvent.startTime/1000)}:R>!`).setColor(0x00AE86)
+                                            .setTimestamp();
                                         try { await discordUser.send({ embeds: [embed] }); await setDoc(lockDoc, { sent_at: now, expires_at: matchedEvent.startTime + (24 * 60 * 60 * 1000) }); } catch (dmErr) {}
                                     }
                                 }
@@ -486,7 +487,8 @@ const commandsData = [
     new SlashCommandBuilder().setName('quests').setDescription('Quest Logs').addStringOption(o => o.setName('name').setDescription('Quest').setRequired(true).setAutocomplete(true)).toJSON(),
     new SlashCommandBuilder().setName('subscribe').setDescription('Manage personal DM Alerts').toJSON(),
     new SlashCommandBuilder().setName('test-dm').setDescription('Verify alerts (Owner Only)').toJSON(),
-    new SlashCommandBuilder().setName('help').setDescription('View guide on how to use Raider Companion').toJSON()
+    new SlashCommandBuilder().setName('help').setDescription('View guide on how to use Raider Companion').toJSON(),
+    new SlashCommandBuilder().setName('servers').setDescription('Manage bot servers (Owner Only)').toJSON()
 ];
 
 client.on('interactionCreate', async interaction => {
@@ -524,6 +526,20 @@ client.on('interactionCreate', async interaction => {
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
                 await interaction.update({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
             }
+            if (interaction.customId === 'server_mgmt_select') {
+                if (interaction.user.id !== OWNER_ID) return;
+                const guild = await client.guilds.fetch(interaction.values[0]).catch(() => null);
+                if (!guild) return interaction.reply({ content: "❌ Not found.", flags: [MessageFlags.Ephemeral] });
+                const owner = await guild.fetchOwner().catch(() => null);
+                const embed = new EmbedBuilder().setTitle(`Server: ${guild.name}`).setColor(0x5865F2).addFields({ name: 'Owner', value: owner?.user.tag || "Unknown" }, { name: 'ID', value: `\`${guild.id}\`` });
+                const row = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Invite').setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder().setCustomId(`srv_dm_${owner?.id || guild.id}`).setLabel('DM Owner').setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave').setStyle(ButtonStyle.Danger),
+                    new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block').setStyle(ButtonStyle.Danger)
+                );
+                await interaction.reply({ embeds: [embed], components: [row], flags: [MessageFlags.Ephemeral] });
+            }
             return;
         }
 
@@ -537,10 +553,49 @@ client.on('interactionCreate', async interaction => {
                 const nextIndex = action === 'next' ? parseInt(current) + 1 : parseInt(current) - 1;
                 await interaction.update({ embeds: [generateHelpEmbed(nextIndex)], components: generateHelpComponents(nextIndex) });
             }
+            if (interaction.customId.startsWith('srv_')) {
+                if (interaction.user.id !== OWNER_ID) return;
+                const [, action, targetId] = interaction.customId.split('_');
+                if (action === 'invite') {
+                    const g = await client.guilds.fetch(targetId);
+                    const c = g.channels.cache.find(ch => ch.isTextBased() && ch.permissionsFor(client.user).has('CreateInstantInvite'));
+                    const inv = await c?.createInvite();
+                    await interaction.reply({ content: inv?.url || "Could not create invite.", flags: [MessageFlags.Ephemeral] });
+                }
+                if (action === 'leave') {
+                    const g = await client.guilds.fetch(targetId);
+                    await g.leave();
+                    await interaction.reply({ content: `✅ Left ${g.name}`, flags: [MessageFlags.Ephemeral] });
+                }
+                if (action === 'block') {
+                    await blacklistGuild(targetId);
+                    const g = await client.guilds.fetch(targetId).catch(() => null);
+                    if (g) await g.leave();
+                    await interaction.reply({ content: `🚫 Blacklisted ${targetId}`, flags: [MessageFlags.Ephemeral] });
+                }
+                if (action === 'dm') {
+                    const modal = new ModalBuilder().setCustomId(`srv_modal_dm_${targetId}`).setTitle('Message Owner');
+                    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dm_text').setLabel('Content').setStyle(TextInputStyle.Paragraph)));
+                    await interaction.showModal(modal);
+                }
+            }
             return;
         }
 
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('srv_modal_dm_')) {
+            const u = await client.users.fetch(interaction.customId.replace('srv_modal_dm_', '')).catch(() => null);
+            if (u) await u.send(`**Dev Message:** ${interaction.fields.getTextInputValue('dm_text')}`).catch(() => {});
+            await interaction.reply({ content: "✅ Sent.", flags: [MessageFlags.Ephemeral] });
+        }
+
         if (!interaction.isChatInputCommand()) return;
+
+        if (interaction.commandName === 'servers') {
+            if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ Unauthorized.", flags: [MessageFlags.Ephemeral] });
+            const guilds = client.guilds.cache.map(g => ({ label: g.name.substring(0, 25), value: g.id }));
+            if (guilds.length === 0) return interaction.reply({ content: "No servers.", flags: [MessageFlags.Ephemeral] });
+            await interaction.reply({ content: "👤 **Management Console**", components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('server_mgmt_select').setPlaceholder('Select...').addOptions(guilds.slice(0, 25)))], flags: [MessageFlags.Ephemeral] });
+        }
 
         if (interaction.commandName === 'help') {
             await interaction.reply({ embeds: [generateHelpEmbed(0)], components: generateHelpComponents(0), flags: [MessageFlags.Ephemeral] });
