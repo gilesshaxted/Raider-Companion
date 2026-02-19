@@ -123,7 +123,8 @@ const client = new Client({
         GatewayIntentBits.GuildScheduledEvents,
         GatewayIntentBits.GuildMessageReactions,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.DirectMessages 
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildPresences // Added for "Active Members" calculation
     ],
     partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.Channel]
 });
@@ -283,8 +284,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                                     const lockDoc = doc(db, 'artifacts', appId, 'public', 'data', 'sent_alerts', alertKey);
                                     const lockSnap = await getDoc(lockDoc);
                                     if (!lockSnap.exists()) {
-                                        const embed = new EmbedBuilder().setTitle("🔔 Rotation Starting").setDescription(`${getEmoji(matchedEvent.name)} **${matchedEvent.name}** on **${matchedEvent.map}** starts <t:${Math.floor(matchedEvent.startTime/1000)}:R>!`).setColor(0x00AE86)
-                                            .setTimestamp();
+                                        const embed = new EmbedBuilder().setTitle("🔔 Rotation Starting").setDescription(`${getEmoji(matchedEvent.name)} **${matchedEvent.name}** on **${matchedEvent.map}** starts <t:${Math.floor(matchedEvent.startTime/1000)}:R>!`).setColor(0x00AE86).setTimestamp();
                                         try { await discordUser.send({ embeds: [embed] }); await setDoc(lockDoc, { sent_at: now, expires_at: matchedEvent.startTime + (24 * 60 * 60 * 1000) }); } catch (dmErr) {}
                                     }
                                 }
@@ -528,16 +528,37 @@ client.on('interactionCreate', async interaction => {
             }
             if (interaction.customId === 'server_mgmt_select') {
                 if (interaction.user.id !== OWNER_ID) return;
+                
                 const guild = await client.guilds.fetch(interaction.values[0]).catch(() => null);
-                if (!guild) return interaction.reply({ content: "❌ Not found.", flags: [MessageFlags.Ephemeral] });
+                if (!guild) return interaction.reply({ content: "❌ Server not accessible.", flags: [MessageFlags.Ephemeral] });
+                
                 const owner = await guild.fetchOwner().catch(() => null);
-                const embed = new EmbedBuilder().setTitle(`Server: ${guild.name}`).setColor(0x5865F2).addFields({ name: 'Owner', value: owner?.user.tag || "Unknown" }, { name: 'ID', value: `\`${guild.id}\`` });
+                const botJoinedAt = guild.members.me?.joinedTimestamp;
+                
+                // Calculate "Active" members (non-offline)
+                // Note: guild.members.cache is only fully populated if the bot has fetched members previously
+                // We attempt to get the size of cached presences that are not offline
+                const activeMembers = guild.members.cache.filter(m => m.presence && m.presence.status !== 'offline').size;
+
+                const embed = new EmbedBuilder()
+                    .setTitle(`🛡️ Server Intelligence: ${guild.name}`)
+                    .setThumbnail(guild.iconURL({ dynamic: true }))
+                    .setColor(0x5865F2)
+                    .addFields(
+                        { name: '👤 Owner', value: `${owner?.user.tag || "Unknown"} (\`${owner?.id || "N/A"}\`)`, inline: true },
+                        { name: '🆔 Server ID', value: `\`${guild.id}\``, inline: true },
+                        { name: '📅 Bot Joined', value: botJoinedAt ? `<t:${Math.floor(botJoinedAt / 1000)}:f> (<t:${Math.floor(botJoinedAt / 1000)}:R>)` : "Unknown", inline: false },
+                        { name: '👥 Member Count', value: `Total: **${guild.memberCount.toLocaleString()}**\nActive: **${activeMembers.toLocaleString()}**`, inline: true }
+                    )
+                    .setTimestamp();
+
                 const row = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Invite').setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Create Invite').setStyle(ButtonStyle.Primary),
                     new ButtonBuilder().setCustomId(`srv_dm_${owner?.id || guild.id}`).setLabel('DM Owner').setStyle(ButtonStyle.Secondary),
-                    new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave').setStyle(ButtonStyle.Danger),
-                    new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block').setStyle(ButtonStyle.Danger)
+                    new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave Server').setStyle(ButtonStyle.Danger),
+                    new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block/Blacklist').setStyle(ButtonStyle.Danger)
                 );
+
                 await interaction.reply({ embeds: [embed], components: [row], flags: [MessageFlags.Ephemeral] });
             }
             return;
