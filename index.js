@@ -31,7 +31,8 @@ const path = require('path');
 
 // --- FIREBASE WEB SDK SETUP ---
 const { initializeApp } = require('firebase/app');
-const { getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, query } = require('firebase/firestore');
+// initializeFirestore allows for the experimentalForceLongPolling setting
+const { initializeFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, query } = require('firebase/firestore');
 const { getAuth, signInAnonymously } = require('firebase/auth');
 
 const firebaseConfig = {
@@ -44,7 +45,13 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
+
+// HARDENED FIRESTORE CONFIGURATION
+// Switched to Long Polling to prevent RST_STREAM errors in long-running cloud environments
+const db = initializeFirestore(app, {
+    experimentalForceLongPolling: true,
+});
+
 const auth = getAuth(app);
 const appId = 'raider-companion';
 const OWNER_ID = '444211741774184458';
@@ -194,7 +201,10 @@ async function getUserSubscriptions(userId) {
     try {
         const snap = await getDocs(getUserSubCollection(userId));
         return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    } catch (e) { return []; }
+    } catch (e) { 
+        console.error(`[Firestore] Error fetching subs for ${userId}:`, e.message);
+        return []; 
+    }
 }
 
 async function isGuildBlacklisted(guildId) {
@@ -228,6 +238,7 @@ async function refreshCaches() {
             });
         }
         traderCategories = Array.from(cats);
+        console.log(`[Cache] Success: Loaded ${arcCache.length} ARC, ${itemCache.length} Items.`);
     } catch (e) { console.error("❌ Error refreshing caches:", e.message); }
 }
 
@@ -327,7 +338,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                     config.activeAlerts = freshAlerts;
                 }
 
-                // 2. DISCORD SCHEDULED EVENTS SYNC
+                // 2. DISCORD SCHEDULED EVENTS SYNC (If Enabled)
                 if (config.scheduledEventsEnabled !== false) {
                     let existingScheduledEvents = [];
                     try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
@@ -384,7 +395,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                 const summarySent = await syncMessage(channel, config, 'Summary', summary);
                 if (summarySent && forceNewMessages) { for (const emoji of Object.values(eventEmojis)) { try { await summarySent.react(emoji); } catch (e) {} } }
 
-                // 5. ROLE PINGS (SENT LAST)
+                // 5. ROLE PINGS (SENT LAST & If Enabled)
                 if (config.rolePingsEnabled !== false) {
                     const scorableForPing = events.filter(e => e.startTime > now && e.startTime <= alertWindow);
                     for (const e of scorableForPing) {
@@ -480,12 +491,14 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.isStringSelectMenu()) {
             if (interaction.customId === 'trader_item_select') {
-                const item = traderItemsFlat.find(i => i.id === interaction.values[0]);
-                if (item) await interaction.reply({ embeds: [buildTraderItemEmbed(item)], flags: [MessageFlags.Ephemeral] });
+                const i = traderItemsFlat.find(it => it.id === interaction.values[0]);
+                if (i) await interaction.reply({ embeds: [buildTraderItemEmbed(i)], flags: [MessageFlags.Ephemeral] });
             }
             if (interaction.customId === 'sub_delete_select') {
+                // DEFENSIVE: Defer to prevent Unknown Interaction if DB is slow
+                await interaction.deferUpdate();
                 await deleteDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', interaction.values[0]));
-                await interaction.update({ content: "✅ Deleted.", embeds: [], components: [] });
+                await interaction.editReply({ content: "✅ Deleted.", embeds: [], components: [] });
             }
             if (interaction.customId === 'sub_create_map') {
                 const opts = Object.keys(eventEmojis).map(e => ({ label: e, value: e, emoji: eventEmojis[e] }));
@@ -497,10 +510,13 @@ client.on('interactionCreate', async interaction => {
             }
             if (interaction.customId.startsWith('sub_create_times|')) {
                 const [, map, event] = interaction.customId.split('|');
+                const numericOffsets = interaction.values.map(Number);
                 const subId = `${map}_${event}`.toLowerCase().replace(/\s/g, '_');
-                await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: interaction.values.map(Number), created_at: Date.now() });
+                // DEFENSIVE: Defer update
+                await interaction.deferUpdate();
+                await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: numericOffsets, created_at: Date.now() });
                 await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
-                await interaction.update({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
+                await interaction.editReply({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
             }
             if (interaction.customId === 'server_mgmt_select') {
                 if (interaction.user.id !== OWNER_ID) return;
@@ -508,8 +524,8 @@ client.on('interactionCreate', async interaction => {
                 const owner = await guild.fetchOwner();
                 const BotJoined = guild.members.me?.joinedTimestamp;
                 const active = guild.members.cache.filter(m => m.presence && m.presence.status !== 'offline').size;
-                const embed = new EmbedBuilder().setTitle(guild.name).setThumbnail(guild.iconURL()).setColor(0x5865F2).addFields({ name: 'Owner', value: `${owner.user.tag} (\`${owner.id}\`)`, inline: true }, { name: 'ID', value: `\`${guild.id}\``, inline: true }, { name: 'Joined', value: `<t:${Math.floor(BotJoined/1000)}:R>`, inline: true }, { name: 'Members', value: `Total: ${guild.memberCount}\nActive: ${active}`, inline: true });
-                const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Invite').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`srv_dm_${owner.id}`).setLabel('DM').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block').setStyle(ButtonStyle.Danger));
+                const embed = new EmbedBuilder().setTitle(`🛡️ Server: ${guild.name}`).setThumbnail(guild.iconURL()).setColor(0x5865F2).addFields({ name: '👤 Owner', value: `${owner?.user.tag || "Unknown"} (\`${owner?.id || "N/A"}\`)`, inline: true }, { name: '🆔 Server ID', value: `\`${guild.id}\``, inline: true }, { name: '📅 Bot Joined', value: BotJoined ? `<t:${Math.floor(BotJoined / 1000)}:f>` : "Unknown", inline: false }, { name: '👥 Member Count', value: `Total: **${guild.memberCount}**\nActive: **${active}**`, inline: true }).setTimestamp();
+                const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Invite').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`srv_dm_${owner?.id || guild.id}`).setLabel('DM Owner').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave Server').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block/Blacklist').setStyle(ButtonStyle.Danger));
                 await interaction.reply({ embeds: [embed], components: [row], flags: [MessageFlags.Ephemeral] });
             }
             return;
@@ -566,67 +582,78 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.isModalSubmit() && interaction.customId.startsWith('srv_modal_dm_')) {
             const u = await client.users.fetch(interaction.customId.replace('srv_modal_dm_', ''));
-            await u.send(`**Dev:** ${interaction.fields.getTextInputValue('dm_text')}`);
-            await interaction.reply({ content: "Sent.", flags: [MessageFlags.Ephemeral] });
+            if (u) await u.send(`**Dev Message:** ${interaction.fields.getTextInputValue('dm_text')}`).catch(()=>{});
+            await interaction.reply({ content: "✅ Sent.", flags: [MessageFlags.Ephemeral] });
             return;
         }
 
         if (!interaction.isChatInputCommand()) return;
 
-        // RESTORED: /arc command
+        // INTELLIGENCE COMMANDS WITH NULL PROTECTION
         if (interaction.commandName === 'arc') {
-            const unitId = interaction.options.getString('unit');
-            const arc = arcCache.find(a => a.id === unitId);
-            if (!arc) return interaction.reply({ content: "❌ Not found.", flags: [MessageFlags.Ephemeral] });
-            const embed = new EmbedBuilder().setTitle(`🤖 Intelligence: ${arc.name}`).setDescription(arc.description).setColor(0x5865F2).setThumbnail(arc.icon).setImage(arc.image).setTimestamp();
+            const arc = arcCache.find(a => a.id === interaction.options.getString('unit'));
+            if (!arc) return interaction.reply({ content: "❌ ARC Intel not found.", flags: [MessageFlags.Ephemeral] });
+            const embed = new EmbedBuilder().setTitle(`🤖 Intel: ${arc.name}`).setDescription(arc.description).setColor(0x5865F2).setThumbnail(arc.icon).setImage(arc.image);
             await interaction.reply({ embeds: [embed] });
         }
 
-        // RESTORED: /item command
         if (interaction.commandName === 'item') {
-            const itemId = interaction.options.getString('name');
-            const item = itemCache.find(i => i.id === itemId);
-            if (!item) return interaction.reply({ content: "❌ Not found.", flags: [MessageFlags.Ephemeral] });
+            const item = itemCache.find(i => i.id === interaction.options.getString('name'));
+            if (!item) return interaction.reply({ content: "❌ Item not found.", flags: [MessageFlags.Ephemeral] });
             const embed = new EmbedBuilder().setTitle(`📦 Item: ${item.name}`).setDescription(item.description || "No data.").setColor(rarityColors[item.rarity] || 0x5865F2).setThumbnail(item.icon).addFields({ name: 'Rarity', value: item.rarity || 'Common', inline: true }, { name: 'Value', value: `🪙 ${item.value?.toLocaleString() || 0}`, inline: true });
             if (item.workbench) embed.addFields({ name: 'Workbench', value: `🛠️ ${item.workbench}`, inline: true });
-            if (item.loot_area) embed.addFields({ name: 'Loot', value: `📍 ${item.loot_area}`, inline: true });
+            if (item.loot_area) embed.addFields({ name: 'Loot Area', value: `📍 ${item.loot_area}`, inline: true });
             await interaction.reply({ embeds: [embed] });
         }
 
-        // RESTORED: /traders command
         if (interaction.commandName === 'traders') {
-            const query = interaction.options.getString('name');
-            if (query.startsWith('category:')) {
-                const cat = query.split(':')[1];
+            const q = interaction.options.getString('name');
+            if (q.startsWith('category:')) {
+                const cat = q.split(':')[1];
                 const items = traderItemsFlat.filter(i => i.item_type === cat);
-                const list = items.map(i => `• ${i.name} (${i.traderName})`).join('\n');
-                const embed = new EmbedBuilder().setTitle(`📁 Category: ${cat}`).setDescription(list).setColor(0x3498db);
+                if (items.length === 0) return interaction.reply({ content: "❌ No items found.", flags: [MessageFlags.Ephemeral] });
+                const embed = new EmbedBuilder().setTitle(`📁 Category: ${cat}`).setDescription(items.map(i => `• ${i.name} (${i.traderName})`).join('\n')).setColor(0x3498db);
                 const sel = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
                 await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sel)] });
-            } else if (query.startsWith('trader:')) {
-                const name = query.split(':')[1];
+            } else if (q.startsWith('trader:')) {
+                const name = q.split(':')[1];
                 const items = traderCache[name];
-                const list = items.map(i => `• ${i.name} - 🪙 ${i.trader_price.toLocaleString()}`).join('\n');
-                const embed = new EmbedBuilder().setTitle(`👤 Trader: ${name}`).setDescription(list).setColor(0x00AE86);
+                if (!items) return interaction.reply({ content: "❌ Trader not found.", flags: [MessageFlags.Ephemeral] });
+                const embed = new EmbedBuilder().setTitle(`👤 Trader: ${name}`).setDescription(items.map(i => `• ${i.name} - 🪙 ${i.trader_price.toLocaleString()}`).join('\n')).setColor(0x00AE86);
                 const sel = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
                 await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sel)] });
             }
         }
 
-        // RESTORED: /quests command
         if (interaction.commandName === 'quests') {
             const questId = interaction.options.getString('name');
             await interaction.deferReply();
             try {
                 const res = await axios.get(`${QUESTS_API_URL}?id=${questId}&page=1`);
                 const q = res.data?.data;
-                if (!q) return interaction.editReply("❌ Not found.");
+                if (!q) return interaction.editReply("❌ Quest not found.");
                 const embed = new EmbedBuilder().setTitle(`📜 Quest: ${q.name}`).setColor(0x3498db).setThumbnail(q.image);
                 if (q.trader_name) embed.addFields({ name: 'Giver', value: q.trader_name, inline: true });
                 if (q.xp > 0) embed.addFields({ name: 'XP', value: q.xp.toLocaleString(), inline: true });
                 if (q.objectives?.length > 0) embed.addFields({ name: 'Objectives', value: q.objectives.map(o => `• ${o}`).join('\n') });
                 await interaction.editReply({ embeds: [embed] });
             } catch (e) { await interaction.editReply("❌ API Error."); }
+        }
+
+        // DEFERRAL FIX FOR /subscribe
+        if (interaction.commandName === 'subscribe') {
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+            const subs = await getUserSubscriptions(interaction.user.id);
+            const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal rotation alerts.');
+            if (subs.length > 0) {
+                const list = subs.map(s => `• ${getEmoji(s.event)} ${s.event} on ${s.map}\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`).join('\n\n');
+                embed.addFields({ name: 'Active Alerts', value: list });
+                const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
+                await interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)] });
+            } else {
+                embed.addFields({ name: 'Status', value: 'No active personal subscriptions found.' });
+                await interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success))] });
+            }
         }
 
         if (interaction.commandName === 'servers') {
