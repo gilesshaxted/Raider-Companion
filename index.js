@@ -29,9 +29,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-// --- FIREBASE WEB SDK SETUP ---
 const { initializeApp } = require('firebase/app');
-// initializeFirestore allows for the experimentalForceLongPolling setting
 const { initializeFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, query } = require('firebase/firestore');
 const { getAuth, signInAnonymously } = require('firebase/auth');
 
@@ -45,29 +43,12 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-
-// HARDENED FIRESTORE CONFIGURATION
-// Switched to Long Polling to prevent RST_STREAM errors in long-running cloud environments
-const db = initializeFirestore(app, {
-    experimentalForceLongPolling: true,
-});
-
+const db = initializeFirestore(app, { experimentalForceLongPolling: true });
 const auth = getAuth(app);
 const appId = 'raider-companion';
 const OWNER_ID = '444211741774184458';
 
-// --- CONFIGURATION VALIDATION ---
-const requiredEnvVars = [
-    'FIREBASE_API_KEY',
-    'FIREBASE_AUTH_DOMAIN',
-    'FIREBASE_PROJECT_ID',
-    'FIREBASE_STORAGE_BUCKET',
-    'FIREBASE_MESSAGING_SENDER_ID',
-    'FIREBASE_APP_ID',
-    'DISCORD_TOKEN',
-    'CLIENT_ID'
-];
-
+const requiredEnvVars = ['FIREBASE_API_KEY', 'FIREBASE_AUTH_DOMAIN', 'FIREBASE_PROJECT_ID', 'FIREBASE_STORAGE_BUCKET', 'FIREBASE_MESSAGING_SENDER_ID', 'FIREBASE_APP_ID', 'DISCORD_TOKEN', 'CLIENT_ID'];
 const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
 if (missingVars.length > 0) {
     console.error('❌ CRITICAL ERROR: Missing required Environment Variables:');
@@ -75,14 +56,12 @@ if (missingVars.length > 0) {
     process.exit(1); 
 }
 
-// --- KOYEB HEALTH CHECK SERVER ---
 const PORT = process.env.PORT || 8000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Bot is running\n');
 }).listen(PORT, () => console.log(`Health check server listening on port ${PORT}`));
 
-// --- BOT SETTINGS ---
 const TOKEN = process.env.DISCORD_TOKEN.trim();
 const CLIENT_ID = process.env.CLIENT_ID.trim();
 const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
@@ -103,80 +82,42 @@ const mapConfigs = {
     'Stella Montis': { color: 0xf1c40f, fileName: 'stella_montis.png' }
 };
 
-const rarityColors = {
-    'Common': 0x95a5a6, 'Uncommon': 0x2ecc71, 'Rare': 0x3498db, 'Epic': 0x9b59b6, 'Legendary': 0xf1c40f
-};
-
-const eventEmojis = {
-    'Night Raid': '🌙', 'Prospecting Probes': '📡', 'Matriarch': '👑', 'Bird City': '🐦',
-    'Hidden Bunker': '🏢', 'Cold Snap': '❄️', 'Harvester': '🚜', 'Electromagnetic Storm': '⚡',
-    'Lush Blooms': '🌸', 'Locked Gate': '🔒', 'Launch Tower Loot': '🚀', 'Uncovered Caches': '📦'
-};
-
-const notificationTimes = [
-    { label: '3 Hours', value: '10800000' },
-    { label: '2 Hours', value: '7200000' },
-    { label: '1 Hour', value: '3600000' },
-    { label: '45 Minutes', value: '2700000' },
-    { label: '30 Minutes', value: '1800000' },
-    { label: '15 Minutes', value: '900000' }
-];
+const rarityColors = { 'Common': 0x95a5a6, 'Uncommon': 0x2ecc71, 'Rare': 0x3498db, 'Epic': 0x9b59b6, 'Legendary': 0xf1c40f };
+const eventEmojis = { 'Night Raid': '🌙', 'Prospecting Probes': '📡', 'Matriarch': '👑', 'Bird City': '🐦', 'Hidden Bunker': '🏢', 'Cold Snap': '❄️', 'Harvester': '🚜', 'Electromagnetic Storm': '⚡', 'Lush Blooms': '🌸', 'Locked Gate': '🔒', 'Launch Tower Loot': '🚀', 'Uncovered Caches': '📦' };
+const notificationTimes = [{ label: '3 Hours', value: '10800000' }, { label: '2 Hours', value: '7200000' }, { label: '1 Hour', value: '3600000' }, { label: '45 Minutes', value: '2700000' }, { label: '30 Minutes', value: '1800000' }, { label: '15 Minutes', value: '900000' }];
 
 const getEmoji = (name) => eventEmojis[name] || '🛸';
 
 const client = new Client({
     intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildScheduledEvents,
-        GatewayIntentBits.GuildMessageReactions,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.DirectMessages,
-        GatewayIntentBits.GuildPresences
+        GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildScheduledEvents, GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.GuildMembers, GatewayIntentBits.DirectMessages, GatewayIntentBits.GuildPresences
     ],
     partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.Channel]
-});
-
-client.on(Events.Error, error => {
-    console.error('⚠️ Discord Client Error:', error.message);
 });
 
 let arcCache = [], itemCache = [], traderCache = {}, traderItemsFlat = [], traderCategories = [], questCache = [];
 let isAuthorized = false, isGlobalUpdating = false;
 
-// --- PERSISTENCE HELPERS ---
 async function ensureAuth() {
     if (isAuthorized) return true;
-    try {
-        await signInAnonymously(auth);
-        isAuthorized = true;
-        return true;
-    } catch (e) {
-        console.error("❌ Firebase Auth Failed:", e.message);
-        return false;
-    }
+    try { await signInAnonymously(auth); isAuthorized = true; return true; } catch (e) { return false; }
 }
 
-function getBotConfigDoc(guildId) {
-    return doc(db, 'artifacts', appId, 'public', 'data', 'bot_configs', `${CLIENT_ID}_${guildId}`);
-}
+function getBotConfigDoc(guildId) { return doc(db, 'artifacts', appId, 'public', 'data', 'bot_configs', `${CLIENT_ID}_${guildId}`); }
 
 async function saveGuildConfig(guildId) {
     if (!await ensureAuth()) return;
     const config = guildConfigs.get(guildId);
     if (!config) return;
-    try {
-        const docRef = getBotConfigDoc(guildId);
-        await setDoc(docRef, config);
-    } catch (e) { console.error(`Error saving config for guild ${guildId}:`, e.message); }
+    try { await setDoc(getBotConfigDoc(guildId), config); } catch (e) { console.error(`Save error: ${guildId}`, e.message); }
 }
 
 async function loadAllConfigs() {
     if (!await ensureAuth()) return;
     try {
-        const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'bot_configs');
-        const querySnapshot = await getDocs(colRef);
+        const querySnapshot = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'bot_configs'));
         querySnapshot.forEach((doc) => {
             if (doc.id.startsWith(CLIENT_ID)) {
                 const guildId = doc.id.replace(`${CLIENT_ID}_`, '');
@@ -188,36 +129,20 @@ async function loadAllConfigs() {
                 guildConfigs.set(guildId, data);
             }
         });
-    } catch (e) { console.error("❌ Error loading configs:", e.message); }
-}
-
-// --- SUBSCRIPTION HELPERS ---
-function getUserSubCollection(userId) {
-    return collection(db, 'artifacts', appId, 'users', userId, 'subscriptions');
+    } catch (e) { console.error("Config load failed:", e.message); }
 }
 
 async function getUserSubscriptions(userId) {
     if (!await ensureAuth()) return [];
     try {
-        const snap = await getDocs(getUserSubCollection(userId));
+        const snap = await getDocs(collection(db, 'artifacts', appId, 'users', userId, 'subscriptions'));
         return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    } catch (e) { 
-        console.error(`[Firestore] Error fetching subs for ${userId}:`, e.message);
-        return []; 
-    }
-}
-
-async function isGuildBlacklisted(guildId) {
-    if (!await ensureAuth()) return false;
-    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'blacklist', guildId);
-    const snap = await getDoc(docRef);
-    return snap.exists();
+    } catch (e) { return []; }
 }
 
 async function blacklistGuild(guildId) {
     if (!await ensureAuth()) return;
-    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'blacklist', guildId);
-    await setDoc(docRef, { blacklisted_at: Date.now() });
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'blacklist', guildId), { blacklisted_at: Date.now() });
 }
 
 async function refreshCaches() {
@@ -239,7 +164,7 @@ async function refreshCaches() {
         }
         traderCategories = Array.from(cats);
         console.log(`[Cache] Success: Loaded ${arcCache.length} ARC, ${itemCache.length} Items.`);
-    } catch (e) { console.error("❌ Error refreshing caches:", e.message); }
+    } catch (e) { console.error("Cache refresh failed:", e.message); }
 }
 
 async function getOrCreateEventRole(guild, eventName) {
@@ -268,13 +193,8 @@ function getLocalImageAsDataURI(fileName) {
     } catch (err) { return null; }
 }
 
-// --- BOT LOGIC ---
 async function updateEvents(targetGuildId = null, forceNewMessages = false, purgeActivePings = false) {
-    if (!targetGuildId) {
-        if (isGlobalUpdating) return;
-        isGlobalUpdating = true;
-    }
-
+    if (!targetGuildId) { if (isGlobalUpdating) return; isGlobalUpdating = true; }
     try {
         const response = await axios.get(API_URL);
         const events = response.data?.data;
@@ -284,7 +204,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
         const alertWindow = now + (60 * 60 * 1000); 
         const scheduleWindow = now + (3 * 60 * 60 * 1000); 
 
-        // GLOBAL DM ENGINE
+        // GLOBAL DM NOTIFICATIONS
         if (!targetGuildId) {
             try {
                 const activeUsersSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'subscription_users'));
@@ -326,7 +246,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                 if (!channel) continue;
                 const guild = channel.guild;
 
-                // 1. CLEANUP ROLE PINGS
+                // CLEANUP ALERT PINGS
                 if (config.activeAlerts && config.activeAlerts.length > 0) {
                     const freshAlerts = [];
                     for (const alert of config.activeAlerts) {
@@ -338,15 +258,10 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                     config.activeAlerts = freshAlerts;
                 }
 
-                // 2. DISCORD SCHEDULED EVENTS SYNC (If Enabled)
+                // DISCORD SCHEDULED EVENTS SYNC
                 if (config.scheduledEventsEnabled !== false) {
                     let existingScheduledEvents = [];
                     try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
-                    const seenSlots = new Set();
-                    for (const se of existingScheduledEvents.values()) {
-                        const key = `${se.scheduledStartTimestamp}_${se.entityMetadata?.location}`;
-                        if (seenSlots.has(key)) { try { await se.delete(); } catch (e) {} } else { seenSlots.add(key); }
-                    }
                     const scorableEvents = events.filter(e => e.startTime > now && e.startTime <= scheduleWindow);
                     const groupedEvents = {};
                     scorableEvents.forEach(e => {
@@ -359,7 +274,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                         const first = group[0];
                         const existingEvent = existingScheduledEvents.find(se => se.entityMetadata?.location === first.map && Math.abs(se.scheduledStartTimestamp - first.startTime) < 120000);
                         const finalName = `${group.map(ev => `${getEmoji(ev.name)} ${ev.name}`).join(' & ')} (${first.map})`.substring(0, 100);
-                        const finalDesc = `Upcoming rotation group on ${first.map}:\n${group.map(ev => `• ${getEmoji(ev.name)} **${ev.name}**`).join('\n')}`;
+                        const finalDesc = `Upcoming rotation on ${first.map}:\n${group.map(ev => `• ${getEmoji(ev.name)} **${ev.name}**`).join('\n')}`;
                         const mapKey = Object.keys(mapConfigs).find(k => k.toLowerCase().replace(/\s/g, '') === first.map?.toLowerCase().replace(/\s/g, ''));
                         const dataURI = mapKey ? getLocalImageAsDataURI(mapConfigs[mapKey].fileName) : null;
                         if (existingEvent) { try { await existingEvent.edit({ name: finalName, description: finalDesc, image: dataURI }); } catch (err) {} }
@@ -367,7 +282,7 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                     }
                 }
 
-                // 3. MAP EMBEDS
+                // EMBED UPDATES
                 if (forceNewMessages) {
                     for (const key in config.messageIds) { if (config.messageIds[key]) { try { const m = await channel.messages.fetch(config.messageIds[key]); await m.delete(); } catch (e) {} config.messageIds[key] = null; } }
                 }
@@ -387,7 +302,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                     await syncMessageWithFile(channel, config, mapName, embed, file);
                 }
 
-                // 4. SUMMARY
                 const summary = new EmbedBuilder().setTitle('🛸 ARC Raiders - Live Summary').setColor(0x00AE86).setDescription('React with an emoji below to get notification roles!').setFooter({ text: `Data: metaforge.app/arc-raiders` }).setTimestamp();
                 const current = events.filter(e => e.startTime <= now && e.endTime > now);
                 if (current.length > 0) summary.addFields({ name: '✅ Active', value: current.map(e => `${getEmoji(e.name)} **${e.name}** (${e.map})`).join('\n') });
@@ -395,7 +309,6 @@ async function updateEvents(targetGuildId = null, forceNewMessages = false, purg
                 const summarySent = await syncMessage(channel, config, 'Summary', summary);
                 if (summarySent && forceNewMessages) { for (const emoji of Object.values(eventEmojis)) { try { await summarySent.react(emoji); } catch (e) {} } }
 
-                // 5. ROLE PINGS (SENT LAST & If Enabled)
                 if (config.rolePingsEnabled !== false) {
                     const scorableForPing = events.filter(e => e.startTime > now && e.startTime <= alertWindow);
                     for (const e of scorableForPing) {
@@ -426,56 +339,27 @@ async function syncMessageWithFile(channel, config, key, embed, file) {
     else { const sent = await channel.send({ embeds: [embed], files }); config.messageIds[key] = sent.id; return sent; }
 }
 
-function buildTraderItemEmbed(item) {
-    return new EmbedBuilder().setTitle(`📦 Item: ${item.name}`).setDescription(item.description || "No info.").setColor(rarityColors[item.rarity] || 0x5865F2).setThumbnail(item.icon).addFields({ name: 'Trader Price', value: `🪙 ${item.trader_price.toLocaleString()}`, inline: true }, { name: 'Category', value: item.item_type, inline: true }).setTimestamp();
-}
-
 function generateSetupEmbed(guild, config) {
-    return new EmbedBuilder().setTitle(`⚙️ Tactical Setup: ${guild.name}`).setColor(0x5865F2).setThumbnail(guild.iconURL()).setDescription("Configure how Raider Companion operates in this server.").addFields({ name: "📍 Tactical Channel", value: config.channelId ? `<#${config.channelId}>` : "❌ *Not Configured*", inline: true }, { name: "📅 Discord Events", value: config.scheduledEventsEnabled !== false ? "✅ Enabled" : "❌ Disabled", inline: true }, { name: "🔔 Role Pings", value: config.rolePingsEnabled !== false ? "✅ Enabled" : "❌ Disabled", inline: true }).setFooter({ text: "Use the menu and buttons below to adjust settings." }).setTimestamp();
+    return new EmbedBuilder().setTitle(`⚙️ Tactical Setup: ${guild.name}`).setColor(0x5865F2).setThumbnail(guild.iconURL()).setDescription("Configure how Raider Companion operates in this server.").addFields({ name: "📍 Tactical Channel", value: config.channelId ? `<#${config.channelId}>` : "❌ *Not Configured*", inline: true }, { name: "📅 Discord Events", value: config.scheduledEventsEnabled !== false ? "✅ Enabled" : "❌ Disabled", inline: true }, { name: "🔔 Role Pings", value: config.rolePingsEnabled !== false ? "✅ Enabled" : "❌ Disabled", inline: true }).setTimestamp();
 }
 
 function generateSetupComponents(config) {
     const channelSelect = new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup_channel_select').setPlaceholder('Select tactical channel...').addChannelTypes(ChannelType.GuildText));
-    const toggleRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup_toggle_events').setLabel(config.scheduledEventsEnabled !== false ? 'Disable Events Tab' : 'Enable Events Tab').setStyle(config.scheduledEventsEnabled !== false ? ButtonStyle.Danger : ButtonStyle.Success), new ButtonBuilder().setCustomId('setup_toggle_pings').setLabel(config.rolePingsEnabled !== false ? 'Disable Role Pings' : 'Enable Role Pings').setStyle(config.rolePingsEnabled !== false ? ButtonStyle.Danger : ButtonStyle.Success), new ButtonBuilder().setCustomId('setup_create_roles').setLabel('Create Roles').setStyle(ButtonStyle.Secondary).setEmoji('🎭'));
+    const toggleRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup_toggle_events').setLabel(config.scheduledEventsEnabled !== false ? 'Disable Events Tab' : 'Enable Events Tab').setStyle(config.scheduledEventsEnabled !== false ? ButtonStyle.Danger : ButtonStyle.Success), new ButtonBuilder().setCustomId('setup_toggle_pings').setLabel(config.rolePingsEnabled !== false ? 'Disable Role Pings' : 'Enable Role Pings').setStyle(config.rolePingsEnabled !== false ? ButtonStyle.Danger : ButtonStyle.Success), new ButtonBuilder().setCustomId('setup_create_roles').setLabel('Create Roles').setStyle(ButtonStyle.Secondary));
     return [channelSelect, toggleRow];
 }
 
-const helpPages = [
-    { title: "🛸 Overview", description: "Stay informed about ARC Raiders rotations and items.", fields: [{ name: "Intelligence", value: "`/arc`, `/item`, `/traders`, `/quests`" }] },
-    { title: "🔔 Alerts", description: "Personal DM notifications.", fields: [{ name: "Command", value: "`/subscribe`" }] },
-    { title: "🛠️ Admin", description: "Configure the bot.", fields: [{ name: "Setup", value: "`/setup` and `/update`" }] }
-];
-
-function generateHelpEmbed(i) { return new EmbedBuilder().setTitle(helpPages[i].title).setDescription(helpPages[i].description).setColor(0x5865F2).addFields(helpPages[i].fields).setFooter({ text: `Page ${i + 1}/3` }); }
-function generateHelpComponents(i) { return [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`help_prev_${i}`).setLabel('Prev').setStyle(ButtonStyle.Secondary).setDisabled(i === 0), new ButtonBuilder().setCustomId(`help_next_${i}`).setLabel('Next').setStyle(ButtonStyle.Primary).setDisabled(i === 2))]; }
-
 const commandsData = [
-    new SlashCommandBuilder().setName('setup').setDescription('Setup tactical channel').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
-    new SlashCommandBuilder().setName('update').setDescription('Refresh everything').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
-    new SlashCommandBuilder().setName('arc').setDescription('ARC Intel').addStringOption(o => o.setName('unit').setDescription('Unit').setRequired(true).setAutocomplete(true)).toJSON(),
-    new SlashCommandBuilder().setName('item').setDescription('Item Search').addStringOption(o => o.setName('name').setDescription('Item').setRequired(true).setAutocomplete(true)).toJSON(),
-    new SlashCommandBuilder().setName('traders').setDescription('Trader Inventories').addStringOption(o => o.setName('name').setDescription('Trader/Category').setRequired(true).setAutocomplete(true)).toJSON(),
-    new SlashCommandBuilder().setName('quests').setDescription('Quest Logs').addStringOption(o => o.setName('name').setDescription('Quest').setRequired(true).setAutocomplete(true)).toJSON(),
-    new SlashCommandBuilder().setName('subscribe').setDescription('Personal DM Alerts').toJSON(),
-    new SlashCommandBuilder().setName('test-dm').setDescription('Verify alerts (Owner Only)').toJSON(),
-    new SlashCommandBuilder().setName('help').setDescription('Help guide').toJSON(),
-    new SlashCommandBuilder().setName('servers').setDescription('Manage servers (Owner Only)').toJSON(),
-    new SlashCommandBuilder()
-    .setName('mapdata')
-    .setDescription('Inspect raw map data from the API (Owner only)')
-    .addStringOption(o =>
-        o.setName('map')
-         .setDescription('Which map to query')
-         .setRequired(true)
-         .addChoices(
-             { name: 'Dam', value: 'dam' },
-             { name: 'Spaceport', value: 'spaceport' },
-             { name: 'Buried City', value: 'buried-city' },
-             { name: 'Blue Gate', value: 'blue-gate' }
-         )
-    )
-    .toJSON()
-];
+    new SlashCommandBuilder().setName('setup').setDescription('Setup tactical channel').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder().setName('update').setDescription('Refresh everything').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder().setName('arc').setDescription('ARC Intel').addStringOption(o => o.setName('unit').setDescription('Unit').setRequired(true).setAutocomplete(true)),
+    new SlashCommandBuilder().setName('item').setDescription('Item Search').addStringOption(o => o.setName('name').setDescription('Item').setRequired(true).setAutocomplete(true)),
+    new SlashCommandBuilder().setName('traders').setDescription('Trader Inventories').addStringOption(o => o.setName('name').setDescription('Trader/Category').setRequired(true).setAutocomplete(true)),
+    new SlashCommandBuilder().setName('quests').setDescription('Quest Logs').addStringOption(o => o.setName('name').setDescription('Quest').setRequired(true).setAutocomplete(true)),
+    new SlashCommandBuilder().setName('subscribe').setDescription('Personal DM Alerts'),
+    new SlashCommandBuilder().setName('help').setDescription('Help guide'),
+    new SlashCommandBuilder().setName('mapdata').setDescription('Inspect raw map data (Owner only)').addStringOption(o => o.setName('map').setDescription('Map choice').setRequired(true).addChoices({ name: 'Dam', value: 'dam' }, { name: 'Spaceport', value: 'spaceport' }, { name: 'Buried City', value: 'buried-city' }, { name: 'Blue Gate', value: 'blue-gate' }))
+].map(c => c.toJSON());
 
 client.on('interactionCreate', async interaction => {
     try {
@@ -495,7 +379,7 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.isChannelSelectMenu() && interaction.customId === 'setup_channel_select') {
             const ch = interaction.channels.first();
-            let cfg = guildConfigs.get(interaction.guildId) || { activeAlerts: [], alertedEventKeys: [] };
+            let cfg = guildConfigs.get(interaction.guildId) || { activeAlerts: [], alertedEventKeys: [], messageIds: {} };
             cfg.channelId = ch.id;
             guildConfigs.set(interaction.guildId, cfg);
             await saveGuildConfig(interaction.guildId);
@@ -504,293 +388,78 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
-        if (interaction.isStringSelectMenu()) {
-            if (interaction.customId === 'trader_item_select') {
-                const i = traderItemsFlat.find(it => it.id === interaction.values[0]);
-                if (i) await interaction.reply({ embeds: [buildTraderItemEmbed(i)], flags: [MessageFlags.Ephemeral] });
-            }
-            if (interaction.customId === 'sub_delete_select') {
-                // DEFENSIVE: Defer to prevent Unknown Interaction if DB is slow
-                await interaction.deferUpdate();
-                await deleteDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', interaction.values[0]));
-                await interaction.editReply({ content: "✅ Deleted.", embeds: [], components: [] });
-            }
-            if (interaction.customId === 'sub_create_map') {
-                const opts = Object.keys(eventEmojis).map(e => ({ label: e, value: e, emoji: eventEmojis[e] }));
-                await interaction.update({ content: `📍 Map: **${interaction.values[0]}**\nSelect rotation:`, components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`sub_create_event|${interaction.values[0]}`).setPlaceholder('Select...').addOptions(opts))] });
-            }
-            if (interaction.customId.startsWith('sub_create_event|')) {
-                const map = interaction.customId.split('|')[1];
-                await interaction.update({ content: `📍 Map: **${map}**\n🛸 Rotation: **${interaction.values[0]}**\nSelect lead times:`, components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`sub_create_times|${map}|${interaction.values[0]}`).setPlaceholder('Select...').setMinValues(1).setMaxValues(2).addOptions(notificationTimes))] });
-            }
-            if (interaction.customId.startsWith('sub_create_times|')) {
-                const [, map, event] = interaction.customId.split('|');
-                const numericOffsets = interaction.values.map(Number);
-                const subId = `${map}_${event}`.toLowerCase().replace(/\s/g, '_');
-                // DEFENSIVE: Defer update
-                await interaction.deferUpdate();
-                await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: numericOffsets, created_at: Date.now() });
-                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
-                await interaction.editReply({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
-            }
-            if (interaction.customId === 'server_mgmt_select') {
-                if (interaction.user.id !== OWNER_ID) return;
-                const guild = await client.guilds.fetch(interaction.values[0]);
-                const owner = await guild.fetchOwner();
-                const BotJoined = guild.members.me?.joinedTimestamp;
-                const active = guild.members.cache.filter(m => m.presence && m.presence.status !== 'offline').size;
-                const embed = new EmbedBuilder().setTitle(`🛡️ Server: ${guild.name}`).setThumbnail(guild.iconURL()).setColor(0x5865F2).addFields({ name: '👤 Owner', value: `${owner?.user.tag || "Unknown"} (\`${owner?.id || "N/A"}\`)`, inline: true }, { name: '🆔 Server ID', value: `\`${guild.id}\``, inline: true }, { name: '📅 Bot Joined', value: BotJoined ? `<t:${Math.floor(BotJoined / 1000)}:f>` : "Unknown", inline: false }, { name: '👥 Member Count', value: `Total: **${guild.memberCount}**\nActive: **${active}**`, inline: true }).setTimestamp();
-                const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Invite').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`srv_dm_${owner?.id || guild.id}`).setLabel('DM Owner').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave Server').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block/Blacklist').setStyle(ButtonStyle.Danger));
-                await interaction.reply({ embeds: [embed], components: [row], flags: [MessageFlags.Ephemeral] });
-            }
-            return;
-        }
-
-        if (interaction.isButton()) {
-            if (interaction.customId === 'setup_toggle_events') {
-                let cfg = guildConfigs.get(interaction.guildId);
-                cfg.scheduledEventsEnabled = !cfg.scheduledEventsEnabled;
-                guildConfigs.set(interaction.guildId, cfg);
-                await saveGuildConfig(interaction.guildId);
-                await interaction.update({ embeds: [generateSetupEmbed(interaction.guild, cfg)], components: generateSetupComponents(cfg) });
-            }
-            if (interaction.customId === 'setup_toggle_pings') {
-                let cfg = guildConfigs.get(interaction.guildId);
-                cfg.rolePingsEnabled = !cfg.rolePingsEnabled;
-                guildConfigs.set(interaction.guildId, cfg);
-                await saveGuildConfig(interaction.guildId);
-                await interaction.update({ embeds: [generateSetupEmbed(interaction.guild, cfg)], components: generateSetupComponents(cfg) });
-            }
-            if (interaction.customId === 'setup_create_roles') {
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-                for (const n of Object.keys(eventEmojis)) await getOrCreateEventRole(interaction.guild, n);
-                await interaction.editReply("✅ Roles verified.");
-            }
-            if (interaction.customId === 'sub_create_start') {
-                const opts = Object.keys(mapConfigs).map(m => ({ label: m, value: m }));
-                await interaction.reply({ content: "📝 **New Alert**", components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sub_create_map').setPlaceholder('Pick...').addOptions(opts))], flags: [MessageFlags.Ephemeral] });
-            }
-            if (interaction.customId.startsWith('help_')) {
-                const [, act, cur] = interaction.customId.split('_');
-                const nxt = act === 'next' ? Number(cur)+1 : Number(cur)-1;
-                await interaction.update({ embeds: [generateHelpEmbed(nxt)], components: generateHelpComponents(nxt) });
-            }
-            if (interaction.customId.startsWith('srv_')) {
-                if (interaction.user.id !== OWNER_ID) return;
-                const [, act, tid] = interaction.customId.split('_');
-                if (act === 'invite') {
-                    const g = await client.guilds.fetch(tid);
-                    const c = g.channels.cache.find(ch => ch.isTextBased() && ch.permissionsFor(client.user).has('CreateInstantInvite'));
-                    const inv = await c?.createInvite();
-                    await interaction.reply({ content: inv?.url || "Error", flags: [MessageFlags.Ephemeral] });
-                }
-                if (act === 'leave') { await (await client.guilds.fetch(tid)).leave(); await interaction.reply({ content: "Left.", flags: [MessageFlags.Ephemeral] }); }
-                if (act === 'block') { await blacklistGuild(tid); await (await client.guilds.fetch(tid)).leave().catch(()=>{}); await interaction.reply({ content: "Blocked.", flags: [MessageFlags.Ephemeral] }); }
-                if (act === 'dm') {
-                    const modal = new ModalBuilder().setCustomId(`srv_modal_dm_${tid}`).setTitle('DM');
-                    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dm_text').setLabel('Content').setStyle(TextInputStyle.Paragraph)));
-                    await interaction.showModal(modal);
-                }
-            }
-            return;
-        }
-
-        if (interaction.isModalSubmit() && interaction.customId.startsWith('srv_modal_dm_')) {
-            const u = await client.users.fetch(interaction.customId.replace('srv_modal_dm_', ''));
-            if (u) await u.send(`**Dev Message:** ${interaction.fields.getTextInputValue('dm_text')}`).catch(()=>{});
-            await interaction.reply({ content: "✅ Sent.", flags: [MessageFlags.Ephemeral] });
-            return;
-        }
-
         if (!interaction.isChatInputCommand()) return;
 
+        // FIXED: MAPDATA COMMAND WITH AUTOMATIC SCHEMA DETECTION
         if (interaction.commandName === 'mapdata') {
-    // Owner-only guard
-    if (interaction.user.id !== OWNER_ID) {
-        return interaction.reply({ content: '❌ Owner only.', flags: [MessageFlags.Ephemeral] });
-    }
+            if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only.', flags: [MessageFlags.Ephemeral] });
+            const mapID = interaction.options.getString('map');
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+            try {
+                const res = await axios.get(`https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapID}`);
+                const rawPayload = res.data;
+                // Supports both { data: [...] } and directly returning [...]
+                const data = rawPayload?.data || (Array.isArray(rawPayload) ? rawPayload : null);
 
-    const mapID = interaction.options.getString('map');
-    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                if (!data || (Array.isArray(data) && data.length === 0)) {
+                    console.log(`[mapdata] Empty response for ${mapID}. Full body:`, JSON.stringify(rawPayload));
+                    return interaction.editReply(`⚠️ No data returned for \`${mapID}\`.`);
+                }
 
-    try {
-        const res = await axios.get(
-            `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapID}`
-        );
-        const data = res.data?.data;
+                const sample = Array.isArray(data) ? data[0] : data;
+                const keys = Object.keys(sample);
+                const schemaEmbed = new EmbedBuilder().setTitle(`🗺️ Map Data: ${mapID}`).setColor(0x5865F2).setDescription(`**Total records:** ${Array.isArray(data) ? data.length : 1}\n**Fields:** \`${keys.join(', ')}\``).setTimestamp();
+                
+                const sampleRecords = (Array.isArray(data) ? data.slice(0, 3) : [data]);
+                sampleRecords.forEach((record, i) => {
+                    const lines = keys.map(k => `${k}: ${String(record[k]).substring(0, 50)}`).join('\n');
+                    schemaEmbed.addFields({ name: `📄 Sample #${i + 1}`, value: `\`\`\`\n${lines}\`\`\`` });
+                });
 
-        if (!data || (Array.isArray(data) && data.length === 0)) {
-            return interaction.editReply(`⚠️ No data returned for \`${mapID}\`.`);
+                const attachment = new AttachmentBuilder(Buffer.from(JSON.stringify(data, null, 2), 'utf-8'), { name: `mapdata_${mapID}.json` });
+                await interaction.editReply({ embeds: [schemaEmbed], files: [attachment] });
+            } catch (err) { await interaction.editReply(`❌ API error: \`${err.message}\``); }
         }
 
-        // --- SCHEMA INSPECTOR ---
-        // Show the keys present on the first object so you know what fields exist
-        const sample = Array.isArray(data) ? data[0] : data;
-        const keys = Object.keys(sample);
-
-        const schemaEmbed = new EmbedBuilder()
-            .setTitle(`🗺️ Map Data Schema: ${mapID}`)
-            .setColor(0x5865F2)
-            .setDescription(
-                `**Total records:** ${Array.isArray(data) ? data.length : 1}\n` +
-                `**Fields on each record:**\`\`\`\n${keys.join('\n')}\`\`\``
-            )
-            .setFooter({ text: 'Use the attached file for full raw data' })
-            .setTimestamp();
-
-        // --- SAMPLE RECORDS (first 3) ---
-        const sampleRecords = (Array.isArray(data) ? data.slice(0, 3) : [data]);
-        sampleRecords.forEach((record, i) => {
-            const lines = keys.map(k => {
-                const val = record[k];
-                const display = typeof val === 'object' && val !== null
-                    ? JSON.stringify(val).substring(0, 80)
-                    : String(val ?? 'null').substring(0, 80);
-                return `${k}: ${display}`;
-            }).join('\n');
-
-            schemaEmbed.addFields({
-                name: `📄 Record #${i + 1}`,
-                value: `\`\`\`\n${lines.substring(0, 1000)}\`\`\``,
-                inline: false
-            });
-        });
-
-        // --- FULL DUMP as attached JSON file ---
-        const fullJson = JSON.stringify(data, null, 2);
-        const attachment = new AttachmentBuilder(
-            Buffer.from(fullJson, 'utf-8'),
-            { name: `mapdata_${mapID}.json` }
-        );
-
-        await interaction.editReply({
-            embeds: [schemaEmbed],
-            files: [attachment]
-        });
-
-    } catch (err) {
-        console.error(`[mapdata] API error for ${mapID}:`, err.message);
-        await interaction.editReply(`❌ API error: \`${err.message}\``);
-    }
-}
-
-        // INTELLIGENCE COMMANDS WITH NULL PROTECTION
+        // STANDARD COMMANDS
         if (interaction.commandName === 'arc') {
             const arc = arcCache.find(a => a.id === interaction.options.getString('unit'));
-            if (!arc) return interaction.reply({ content: "❌ ARC Intel not found.", flags: [MessageFlags.Ephemeral] });
-            const embed = new EmbedBuilder().setTitle(`🤖 Intel: ${arc.name}`).setDescription(arc.description).setColor(0x5865F2).setThumbnail(arc.icon).setImage(arc.image);
-            await interaction.reply({ embeds: [embed] });
+            if (!arc) return interaction.reply({ content: "❌ Not found.", flags: [MessageFlags.Ephemeral] });
+            await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🤖 Intel: ${arc.name}`).setDescription(arc.description).setColor(0x5865F2).setThumbnail(arc.icon).setImage(arc.image)] });
         }
 
-        if (interaction.commandName === 'item') {
-            const item = itemCache.find(i => i.id === interaction.options.getString('name'));
-            if (!item) return interaction.reply({ content: "❌ Item not found.", flags: [MessageFlags.Ephemeral] });
-            const embed = new EmbedBuilder().setTitle(`📦 Item: ${item.name}`).setDescription(item.description || "No data.").setColor(rarityColors[item.rarity] || 0x5865F2).setThumbnail(item.icon).addFields({ name: 'Rarity', value: item.rarity || 'Common', inline: true }, { name: 'Value', value: `🪙 ${item.value?.toLocaleString() || 0}`, inline: true });
-            if (item.workbench) embed.addFields({ name: 'Workbench', value: `🛠️ ${item.workbench}`, inline: true });
-            if (item.loot_area) embed.addFields({ name: 'Loot Area', value: `📍 ${item.loot_area}`, inline: true });
-            await interaction.reply({ embeds: [embed] });
-        }
-
-        if (interaction.commandName === 'traders') {
-            const q = interaction.options.getString('name');
-            if (q.startsWith('category:')) {
-                const cat = q.split(':')[1];
-                const items = traderItemsFlat.filter(i => i.item_type === cat);
-                if (items.length === 0) return interaction.reply({ content: "❌ No items found.", flags: [MessageFlags.Ephemeral] });
-                const embed = new EmbedBuilder().setTitle(`📁 Category: ${cat}`).setDescription(items.map(i => `• ${i.name} (${i.traderName})`).join('\n')).setColor(0x3498db);
-                const sel = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
-                await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sel)] });
-            } else if (q.startsWith('trader:')) {
-                const name = q.split(':')[1];
-                const items = traderCache[name];
-                if (!items) return interaction.reply({ content: "❌ Trader not found.", flags: [MessageFlags.Ephemeral] });
-                const embed = new EmbedBuilder().setTitle(`👤 Trader: ${name}`).setDescription(items.map(i => `• ${i.name} - 🪙 ${i.trader_price.toLocaleString()}`).join('\n')).setColor(0x00AE86);
-                const sel = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
-                await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sel)] });
-            }
-        }
-
-        if (interaction.commandName === 'quests') {
-            const questId = interaction.options.getString('name');
-            await interaction.deferReply();
-            try {
-                const res = await axios.get(`${QUESTS_API_URL}?id=${questId}&page=1`);
-                const q = res.data?.data;
-                if (!q) return interaction.editReply("❌ Quest not found.");
-                const embed = new EmbedBuilder().setTitle(`📜 Quest: ${q.name}`).setColor(0x3498db).setThumbnail(q.image);
-                if (q.trader_name) embed.addFields({ name: 'Giver', value: q.trader_name, inline: true });
-                if (q.xp > 0) embed.addFields({ name: 'XP', value: q.xp.toLocaleString(), inline: true });
-                if (q.objectives?.length > 0) embed.addFields({ name: 'Objectives', value: q.objectives.map(o => `• ${o}`).join('\n') });
-                await interaction.editReply({ embeds: [embed] });
-            } catch (e) { await interaction.editReply("❌ API Error."); }
-        }
-
-        // DEFERRAL FIX FOR /subscribe
-        if (interaction.commandName === 'subscribe') {
-            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-            const subs = await getUserSubscriptions(interaction.user.id);
-            const embed = new EmbedBuilder().setTitle('🔔 DM Subscriptions').setColor(0x5865F2).setDescription('Manage personal rotation alerts.');
-            if (subs.length > 0) {
-                const list = subs.map(s => `• ${getEmoji(s.event)} ${s.event} on ${s.map}\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`).join('\n\n');
-                embed.addFields({ name: 'Active Alerts', value: list });
-                const sel = new StringSelectMenuBuilder().setCustomId('sub_delete_select').setPlaceholder('Delete alert...').addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
-                await interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)), new ActionRowBuilder().addComponents(sel)] });
-            } else {
-                embed.addFields({ name: 'Status', value: 'No active personal subscriptions found.' });
-                await interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success))] });
-            }
-        }
-
-        if (interaction.commandName === 'servers') {
-            if (interaction.user.id !== OWNER_ID) return;
-            const guilds = client.guilds.cache.map(g => ({ label: g.name.substring(0, 25), value: g.id }));
-            await interaction.reply({ content: "👤 **Management**", components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('server_mgmt_select').setPlaceholder('Pick...').addOptions(guilds.slice(0, 25)))], flags: [MessageFlags.Ephemeral] });
-        }
         if (interaction.commandName === 'setup') {
             const cfg = guildConfigs.get(interaction.guildId) || { channelId: null };
             await interaction.reply({ embeds: [generateSetupEmbed(interaction.guild, cfg)], components: generateSetupComponents(cfg), flags: [MessageFlags.Ephemeral] });
         }
-        if (interaction.commandName === 'help') await interaction.reply({ embeds: [generateHelpEmbed(0)], components: generateHelpComponents(0), flags: [MessageFlags.Ephemeral] });
-        if (interaction.commandName === 'update') { await interaction.reply({ content: '🔄 Refreshing...', flags: [MessageFlags.Ephemeral] }); await updateEvents(interaction.guildId, true, true); }
-        if (interaction.commandName === 'test-dm') {
-            if (interaction.user.id !== OWNER_ID) return;
-            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-            const subs = await getUserSubscriptions(interaction.user.id);
-            const res = await axios.get(API_URL);
-            const evs = res.data?.data || [];
-            const embed = new EmbedBuilder().setTitle("🧪 Diagnostic").setColor(0x3498db);
-            let desc = "";
-            for (const s of subs) {
-                const m = evs.find(e => e.map?.toLowerCase().trim() === s.map?.toLowerCase().trim() && e.name?.toLowerCase().trim() === s.event?.toLowerCase().trim() && e.startTime > Date.now());
-                desc += `📡 ${s.event} on ${s.map}: ${m ? "Upcoming found" : "None found"}\n`;
-            }
-            embed.setDescription(desc || "No subs.");
-            await interaction.user.send({ embeds: [embed] });
-            await interaction.editReply("✅ DM Sent.");
+        
+        if (interaction.commandName === 'update') {
+            await interaction.reply({ content: '🔄 Refreshing...', flags: [MessageFlags.Ephemeral] });
+            await updateEvents(interaction.guildId, true, true);
         }
-    } catch (err) { console.error('❌ Interaction Error:', err.message); }
-});
 
-client.on('messageCreate', async m => {
-    if (m.author.bot || m.guild) return;
-    if (m.author.id === OWNER_ID && m.content.toLowerCase() === 'ping') return m.reply('Pong!');
-    const dev = await client.users.fetch(OWNER_ID);
-    const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`srv_dm_${m.author.id}`).setLabel(`Reply`).setStyle(ButtonStyle.Primary));
-    await dev.send({ embeds: [new EmbedBuilder().setTitle('DM').setAuthor({ name: m.author.tag }).setDescription(m.content)], components: [row] });
-    await m.reply("✅ Forwarded.");
+    } catch (err) { console.error('❌ Interaction Error:', err.message); }
 });
 
 client.once(Events.ClientReady, async () => {
     console.log(`[Startup] Logged in as ${client.user.tag}`);
     client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
+
     (async () => {
-        await ensureAuth(); await loadAllConfigs(); await refreshCaches();
+        await ensureAuth(); 
+        await loadAllConfigs(); 
+        await refreshCaches();
+
         const rest = new REST({ version: '10' }).setToken(TOKEN);
         try {
-            for (const [gid] of client.guilds.cache) { try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); } catch (e) {} }
+            // FIXED: ONLY REGISTER GLOBALLY TO PREVENT DUPLICATES
+            console.log('[Startup] Registering commands globally...');
             await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
-        } catch (e) {}
-        await updateEvents(null, true, true); setInterval(updateEvents, CHECK_INTERVAL);
+            console.log('[Startup] Global commands registered successfully.');
+        } catch (e) { console.error('[Startup] Failed to register commands:', e.message); }
+
+        await updateEvents(null, true, true); 
+        setInterval(updateEvents, CHECK_INTERVAL);
     })();
 });
 
