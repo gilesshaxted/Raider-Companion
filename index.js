@@ -604,6 +604,76 @@ client.on('interactionCreate', async interaction => {
 
         if (!interaction.isChatInputCommand()) return;
 
+        if (interaction.commandName === 'mapdata') {
+    // Owner-only guard
+    if (interaction.user.id !== OWNER_ID) {
+        return interaction.reply({ content: '❌ Owner only.', flags: [MessageFlags.Ephemeral] });
+    }
+
+    const mapID = interaction.options.getString('map');
+    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+    try {
+        const res = await axios.get(
+            `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapID}`
+        );
+        const data = res.data?.data;
+
+        if (!data || (Array.isArray(data) && data.length === 0)) {
+            return interaction.editReply(`⚠️ No data returned for \`${mapID}\`.`);
+        }
+
+        // --- SCHEMA INSPECTOR ---
+        // Show the keys present on the first object so you know what fields exist
+        const sample = Array.isArray(data) ? data[0] : data;
+        const keys = Object.keys(sample);
+
+        const schemaEmbed = new EmbedBuilder()
+            .setTitle(`🗺️ Map Data Schema: ${mapID}`)
+            .setColor(0x5865F2)
+            .setDescription(
+                `**Total records:** ${Array.isArray(data) ? data.length : 1}\n` +
+                `**Fields on each record:**\`\`\`\n${keys.join('\n')}\`\`\``
+            )
+            .setFooter({ text: 'Use the attached file for full raw data' })
+            .setTimestamp();
+
+        // --- SAMPLE RECORDS (first 3) ---
+        const sampleRecords = (Array.isArray(data) ? data.slice(0, 3) : [data]);
+        sampleRecords.forEach((record, i) => {
+            const lines = keys.map(k => {
+                const val = record[k];
+                const display = typeof val === 'object' && val !== null
+                    ? JSON.stringify(val).substring(0, 80)
+                    : String(val ?? 'null').substring(0, 80);
+                return `${k}: ${display}`;
+            }).join('\n');
+
+            schemaEmbed.addFields({
+                name: `📄 Record #${i + 1}`,
+                value: `\`\`\`\n${lines.substring(0, 1000)}\`\`\``,
+                inline: false
+            });
+        });
+
+        // --- FULL DUMP as attached JSON file ---
+        const fullJson = JSON.stringify(data, null, 2);
+        const attachment = new AttachmentBuilder(
+            Buffer.from(fullJson, 'utf-8'),
+            { name: `mapdata_${mapID}.json` }
+        );
+
+        await interaction.editReply({
+            embeds: [schemaEmbed],
+            files: [attachment]
+        });
+
+    } catch (err) {
+        console.error(`[mapdata] API error for ${mapID}:`, err.message);
+        await interaction.editReply(`❌ API error: \`${err.message}\``);
+    }
+}
+
         // INTELLIGENCE COMMANDS WITH NULL PROTECTION
         if (interaction.commandName === 'arc') {
             const arc = arcCache.find(a => a.id === interaction.options.getString('unit'));
