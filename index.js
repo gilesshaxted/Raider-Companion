@@ -3,160 +3,192 @@ const {
     GatewayIntentBits, 
     EmbedBuilder, 
     AttachmentBuilder, 
-    ActionRowBuilder, 
-    ButtonBuilder, 
-    ButtonStyle, 
     REST, 
     Routes, 
     SlashCommandBuilder,
     MessageFlags
 } = require('discord.js');
 const axios = require('axios');
+const { createCanvas, loadImage } = require('canvas');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const OWNER_ID = process.env.OWNER_ID || '0'; // Replace with your Discord ID if not in .env
+const OWNER_ID = process.env.OWNER_ID || '0';
+
+// Update these bounds as you discover the world-to-pixel ratio for Riven Tides
+const MAP_CONFIG = {
+    'dam': {
+        file: 'dam_battlegrounds.png',
+        name: 'Dam Battlegrounds',
+        bounds: { minLat: 0, maxLat: 6000, minLng: 0, maxLng: 6000 }
+    },
+    'sector_zero': {
+        file: 'buried_city.png',
+        name: 'Buried City',
+        bounds: { minLat: 0, maxLat: 5000, minLng: 0, maxLng: 5000 }
+    },
+    'stella_montis': {
+        file: 'stella_montis.png',
+        name: 'Stella Montis',
+        bounds: { minLat: 0, maxLat: 8000, minLng: 0, maxLng: 8000 }
+    },
+    'spaceport': {
+        file: 'spaceport.png',
+        name: 'Spaceport',
+        bounds: { minLat: 0, maxLat: 4000, minLng: 0, maxLng: 4000 }
+    },
+    'riven_tides': {
+        file: 'riven_tides.png',
+        name: 'Riven Tides',
+        bounds: { minLat: 0, maxLat: 6000, minLng: 0, maxLng: 6000 }
+    }
+};
 
 const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
-    ]
+    intents: [GatewayIntentBits.Guilds]
 });
 
 const commands = [
     new SlashCommandBuilder()
-        .setName('mapdata')
-        .setDescription('Analyze and retrieve raw map markers from Metaforge')
+        .setName('mapview')
+        .setDescription('Generate a visual overlay of map markers')
         .addStringOption(option =>
             option.setName('map')
-                .setDescription('The Map ID (e.g., sector_zero)')
-                .setRequired(true)),
+                .setDescription('The Map ID')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Dam', value: 'dam' },
+                    { name: 'Stella Montis', value: 'stella_montis' },
+                    { name: 'Buried City', value: 'sector_zero' },
+                    { name: 'Spaceport', value: 'spaceport' },
+                    { name: 'Riven Tides', value: 'riven_tides' }
+                )),
     new SlashCommandBuilder()
         .setName('status')
-        .setDescription('Check the bot and API connection status')
+        .setDescription('Check system health')
 ].map(command => command.toJSON());
 
 async function registerCommands() {
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
-        console.log('Started refreshing application (/) commands.');
-        await rest.put(
-            Routes.applicationCommands(CLIENT_ID),
-            { body: commands },
-        );
-        console.log('Successfully reloaded application (/) commands.');
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+        console.log('Successfully registered commands.');
     } catch (error) {
-        console.error('Error refreshing commands:', error);
+        console.error('Error registering commands:', error);
     }
 }
 
+async function generateMapImage(mapId, markers) {
+    const config = MAP_CONFIG[mapId];
+    if (!config) throw new Error("Map configuration not found.");
+
+    const imagePath = path.join(__dirname, 'assets', config.file);
+    
+    // Safety check for missing image files (like Riven Tides)
+    if (!fs.existsSync(imagePath)) {
+        throw new Error(`The map image file "${config.file}" is missing from the /assets/ folder.`);
+    }
+
+    const baseImage = await loadImage(imagePath);
+    const canvas = createCanvas(baseImage.width, baseImage.height);
+    const ctx = canvas.getContext('2d');
+
+    // Draw the satellite/base map
+    ctx.drawImage(baseImage, 0, 0);
+
+    markers.forEach(marker => {
+        const { lat, lng, category } = marker;
+        
+        // Convert world coordinates to pixel coordinates based on bounds
+        const x = ((lng - config.bounds.minLng) / (config.bounds.maxLng - config.bounds.minLng)) * baseImage.width;
+        const y = ((lat - config.bounds.minLat) / (config.bounds.maxLat - config.bounds.minLat)) * baseImage.height;
+
+        // Color coding for tactical intelligence
+        let color = '#ffffff';
+        switch(category?.toLowerCase()) {
+            case 'arc': color = '#ff4757'; break; // Red: Enemies
+            case 'containers': color = '#1e90ff'; break; // Blue: Loot
+            case 'locations': color = '#2ed573'; break; // Green: POIs/Extraction
+            case 'nature': color = '#ffa502'; break; // Orange: Resources
+            case 'quests': color = '#eccc68'; break; // Yellow: Quest Items
+            default: color = '#ffffff';
+        }
+
+        // Draw dot with outline for visibility
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    });
+
+    return canvas.toBuffer('image/png');
+}
+
 client.once('ready', () => {
-    console.log(`✅ Logged in as ${client.user.tag}`);
+    console.log(`✅ ${client.user.tag} is online and ready for deployment.`);
     registerCommands();
 });
 
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    try {
-        if (interaction.commandName === 'mapdata') {
-            // Check ownership
-            if (OWNER_ID !== '0' && interaction.user.id !== OWNER_ID) {
-                return interaction.reply({ 
-                    content: '❌ Access Denied: You do not have permission to use map intelligence tools.', 
-                    flags: [MessageFlags.Ephemeral] 
-                });
-            }
-
-            // Immediately defer to avoid "Application Not Responding" (3-second limit)
-            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-
-            const mapID = interaction.options.getString('map');
-            const apiUrl = `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapID}`;
-
-            try {
-                const res = await axios.get(apiUrl, { timeout: 15000 });
-                let rawData = res.data;
-                
-                // Parsing logic for different API response formats
-                let markers = null;
-                if (Array.isArray(rawData)) markers = rawData;
-                else if (rawData?.allData) markers = rawData.allData; 
-                else if (rawData?.data) markers = rawData.data;
-
-                if (!markers || !Array.isArray(markers) || markers.length === 0) {
-                    return interaction.editReply(`⚠️ No data found for map \`${mapID}\`. The API returned an empty set or invalid structure.`);
-                }
-
-                const stats = {};
-                markers.forEach(m => {
-                    const cat = String(m.category || 'Unknown').toUpperCase();
-                    const sub = String(m.subcategory || 'General').toLowerCase();
-                    if (!stats[cat]) stats[cat] = {};
-                    stats[cat][sub] = (stats[cat][sub] || 0) + 1;
-                });
-
-                let analysisStr = "";
-                Object.entries(stats).forEach(([cat, subs]) => {
-                    analysisStr += `**${cat}**\n`;
-                    // Sort subcategories by frequency
-                    Object.entries(subs).sort((a,b) => b[1] - a[1]).forEach(([sub, count]) => {
-                        analysisStr += `> \`${sub}\`: **${count}**\n`;
-                    });
-                });
-
-                const schemaEmbed = new EmbedBuilder()
-                    .setTitle(`🗺️ Intelligence Report: ${mapID.toUpperCase()}`)
-                    .setColor(0x3498db)
-                    .setDescription(`**Total Markers Identified:** ${markers.length}\n\n${analysisStr.substring(0, 3800)}`)
-                    .setFooter({ text: `Source: Metaforge API | Requested by ${interaction.user.username}` })
-                    .setTimestamp();
-                
-                // Add a sample of the first record's fields
-                const keys = Object.keys(markers[0]);
-                const sample = markers[0];
-                const sampleLines = Object.keys(sample).slice(0, 6).map(k => `${k}: ${String(sample[k]).substring(0, 40)}`).join('\n');
-                
-                schemaEmbed.addFields(
-                    { name: '📊 Schema Info', value: `\`\`\`\nFields: ${keys.slice(0, 10).join(', ')}${keys.length > 10 ? '...' : ''}\n\`\`\``, inline: false },
-                    { name: '📄 Record Sample', value: `\`\`\`yaml\n${sampleLines}\n\`\`\``, inline: false }
-                );
-
-                // Attach full JSON file for the user to download
-                const attachment = new AttachmentBuilder(Buffer.from(JSON.stringify(markers, null, 2)), { name: `mapdata_${mapID}.json` });
-                
-                await interaction.editReply({ embeds: [schemaEmbed], files: [attachment] });
-
-            } catch (apiErr) {
-                console.error('API Error:', apiErr.message);
-                await interaction.editReply(`❌ Failed to fetch map data. API might be down or map ID is invalid.\nError: \`${apiErr.message}\``);
-            }
+    if (interaction.commandName === 'mapview') {
+        // Restricted access
+        if (OWNER_ID !== '0' && interaction.user.id !== OWNER_ID) {
+            return interaction.reply({ content: '❌ Tactical data access restricted to authorized personnel.', flags: [MessageFlags.Ephemeral] });
         }
 
-        if (interaction.commandName === 'status') {
-            const statusEmbed = new EmbedBuilder()
-                .setTitle('🤖 System Status')
-                .setColor(0x2ecc71)
+        await interaction.deferReply();
+        const mapID = interaction.options.getString('map');
+        const apiUrl = `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapID}`;
+
+        try {
+            const res = await axios.get(apiUrl);
+            const markers = Array.isArray(res.data) ? res.data : (res.data.data || res.data.allData || []);
+
+            if (markers.length === 0) {
+                return interaction.editReply(`⚠️ Intelligence report for **${MAP_CONFIG[mapID].name}** is empty. No markers found.`);
+            }
+
+            const imageBuffer = await generateMapImage(mapID, markers);
+            const attachment = new AttachmentBuilder(imageBuffer, { name: `tactical_render_${mapID}.png` });
+
+            const embed = new EmbedBuilder()
+                .setTitle(`🗺️ Tactical Overlay: ${MAP_CONFIG[mapID].name}`)
+                .setDescription(`Successfully rendered **${markers.length}** markers onto satellite imagery.`)
                 .addFields(
-                    { name: 'Latency', value: `\`${client.ws.ping}ms\``, inline: true },
-                    { name: 'Uptime', value: `\`${Math.floor(process.uptime() / 60)} minutes\``, inline: true }
+                    { name: 'Red', value: 'ARC Hostiles', inline: true },
+                    { name: 'Blue', value: 'Containers/Loot', inline: true },
+                    { name: 'Green', value: 'POIs/Spawns', inline: true }
                 )
-                .setTimestamp();
-            await interaction.reply({ embeds: [statusEmbed] });
-        }
+                .setColor(0x2f3542)
+                .setImage(`attachment://tactical_render_${mapID}.png`)
+                .setTimestamp()
+                .setFooter({ text: "Raider Companion | Intelligence Systems" });
 
-    } catch (err) {
-        console.error('Interaction Execution Error:', err);
-        const errorContent = '🚨 There was an internal error while executing this command.';
-        
-        if (interaction.deferred || interaction.replied) {
-            await interaction.editReply({ content: errorContent });
-        } else {
-            await interaction.reply({ content: errorContent, flags: [MessageFlags.Ephemeral] });
+            await interaction.editReply({ embeds: [embed], files: [attachment] });
+
+        } catch (err) {
+            console.error(err);
+            const errorMessage = err.message.includes('missing') 
+                ? `❌ **Missing Map Image:** Please upload \`${MAP_CONFIG[mapID].file}\` to your \`/assets/\` folder.`
+                : `❌ **Deployment Error:** ${err.message}`;
+                
+            await interaction.editReply(errorMessage);
         }
+    }
+
+    if (interaction.commandName === 'status') {
+        await interaction.reply({ 
+            content: `🛰️ Uplink stable. Latency: **${client.ws.ping}ms**`, 
+            flags: [MessageFlags.Ephemeral] 
+        });
     }
 });
 
