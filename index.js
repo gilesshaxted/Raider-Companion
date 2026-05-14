@@ -459,7 +459,22 @@ const commandsData = [
     new SlashCommandBuilder().setName('subscribe').setDescription('Personal DM Alerts').toJSON(),
     new SlashCommandBuilder().setName('test-dm').setDescription('Verify alerts (Owner Only)').toJSON(),
     new SlashCommandBuilder().setName('help').setDescription('Help guide').toJSON(),
-    new SlashCommandBuilder().setName('servers').setDescription('Manage servers (Owner Only)').toJSON()
+    new SlashCommandBuilder().setName('servers').setDescription('Manage servers (Owner Only)').toJSON(),
+    new SlashCommandBuilder()
+    .setName('mapdata')
+    .setDescription('Inspect raw map data from the API (Owner only)')
+    .addStringOption(o =>
+        o.setName('map')
+         .setDescription('Which map to query')
+         .setRequired(true)
+         .addChoices(
+             { name: 'Dam', value: 'dam' },
+             { name: 'Spaceport', value: 'spaceport' },
+             { name: 'Buried City', value: 'buried-city' },
+             { name: 'Blue Gate', value: 'blue-gate' }
+         )
+    )
+    .toJSON()
 ];
 
 client.on('interactionCreate', async interaction => {
