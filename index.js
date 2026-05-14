@@ -188,7 +188,7 @@ client.on('interactionCreate', async interaction => {
 
         if (!interaction.isChatInputCommand()) return;
 
-        /* FIXED: Improved Data Parser and Robust Handling for MapData */
+        /* FIXED: Improved Data Parser for MapData */
         if (interaction.commandName === 'mapdata') {
             if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Owner only.', flags: [MessageFlags.Ephemeral] });
             await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
@@ -234,17 +234,25 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        /* FIXED: Added Defer to prevent "Application did not respond" */
+        /* FIXED: Added immediate defer to prevent "Application did not respond" */
         if (interaction.commandName === 'servers') {
-            if (interaction.user.id !== OWNER_ID) return;
+            if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ Unauthorized.", flags: [MessageFlags.Ephemeral] });
+            
             await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
             
             const guilds = client.guilds.cache.map(g => ({ label: g.name.substring(0, 25), value: g.id }));
             if (guilds.length === 0) return interaction.editReply("❌ No servers found.");
 
+            const row = new ActionRowBuilder().addComponents(
+                new StringSelectMenuBuilder()
+                    .setCustomId('server_mgmt_select')
+                    .setPlaceholder('Select a server to manage...')
+                    .addOptions(guilds.slice(0, 25))
+            );
+
             await interaction.editReply({ 
-                content: "👤 **Management**", 
-                components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('server_mgmt_select').setPlaceholder('Pick...').addOptions(guilds.slice(0, 25)))] 
+                content: "👤 **Server Management Console**", 
+                components: [row] 
             });
         }
 
@@ -257,12 +265,51 @@ client.on('interactionCreate', async interaction => {
     } catch (err) { console.error('Interaction error:', err.message); }
 });
 
+// CRITICAL: Every command AND every option must have a .setDescription() call.
 const commandsData = [
-    new SlashCommandBuilder().setName('setup').setDescription('Setup tactical channel').toJSON(),
-    new SlashCommandBuilder().setName('mapdata').setDescription('Owner: Inspect map data').addStringOption(o => o.setName('map').setDescription('Map name').setRequired(true).addChoices({name:'Dam',value:'dam'},{name:'Blue Gate',value:'blue-gate'})).toJSON(),
-    new SlashCommandBuilder().setName('servers').setDescription('Owner: Manage servers').toJSON(),
-    new SlashCommandBuilder().setName('arc').setDescription('ARC Intel').addStringOption(o => o.setName('unit').setRequired(true).setAutocomplete(true)).toJSON(),
-    new SlashCommandBuilder().setName('item').setDescription('Item Search').addStringOption(o => o.setName('name').setRequired(true).setAutocomplete(true)).toJSON()
+    new SlashCommandBuilder()
+        .setName('setup')
+        .setDescription('Configure the tactical channel for rotation updates')
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('mapdata')
+        .setDescription('Owner Only: Inspect raw map marker data from the API')
+        .addStringOption(option => 
+            option.setName('map')
+                .setDescription('The internal ID of the map to query')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Dam', value: 'dam' },
+                    { name: 'Blue Gate', value: 'blue-gate' },
+                    { name: 'Spaceport', value: 'spaceport' },
+                    { name: 'Buried City', value: 'buried-city' }
+                )
+        )
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('servers')
+        .setDescription('Owner Only: List and manage servers the bot is currently in')
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('arc')
+        .setDescription('Retrieve tactical intel on specific ARC units')
+        .addStringOption(option => 
+            option.setName('unit')
+                .setDescription('The name of the ARC unit to research')
+                .setRequired(true)
+                .setAutocomplete(true)
+        )
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('item')
+        .setDescription('Search the database for item stats and locations')
+        .addStringOption(option => 
+            option.setName('name')
+                .setDescription('The name of the item to search for')
+                .setRequired(true)
+                .setAutocomplete(true)
+        )
+        .toJSON()
 ];
 
 client.once(Events.ClientReady, async () => {
@@ -273,10 +320,13 @@ client.once(Events.ClientReady, async () => {
 
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
-        /* GLOBAL REGISTRATION ONLY (Point 1 Fix) */
+        // REGISTER GLOBALLY ONLY (Prevents double-command entries)
+        console.log('[Ready] Pushing slash commands to Global Registry...');
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
-        console.log('[Ready] Commands registered globally.');
-    } catch (e) { console.error(e); }
+        console.log('[Ready] Commands registered successfully.');
+    } catch (e) { 
+        console.error('[Ready] Command Registry Error:', e); 
+    }
 
     setInterval(updateEvents, CHECK_INTERVAL);
 });
