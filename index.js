@@ -19,7 +19,8 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OWNER_ID = process.env.OWNER_ID || '0';
 
-// Configuration for World-to-Pixel coordinate scaling
+// World-to-Pixel scaling configuration
+// Note: maxLat/maxLng define the 'virtual' size of the game world for scaling
 const MAP_CONFIG = {
     'dam': {
         file: 'dam_battlegrounds.png',
@@ -57,6 +58,7 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds]
 });
 
+// We define /mapview as the primary command for the overlay
 const commands = [
     new SlashCommandBuilder()
         .setName('mapview')
@@ -75,14 +77,14 @@ const commands = [
                 )),
     new SlashCommandBuilder()
         .setName('status')
-        .setDescription('Check bot heartbeat')
+        .setDescription('Check bot heartbeat and system health')
 ].map(command => command.toJSON());
 
 async function registerCommands() {
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
         console.log('🔄 Started refreshing application (/) commands.');
-        // Global registration (might take a few mins to propagate, use Guild ID for instant test)
+        // Global registration
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
         console.log('✅ Successfully reloaded application (/) commands.');
     } catch (error) {
@@ -94,6 +96,7 @@ async function generateMapImage(mapId, markers) {
     const config = MAP_CONFIG[mapId];
     const imagePath = path.join(__dirname, 'assets', config.file);
     
+    // Safety check for asset existence
     if (!fs.existsSync(imagePath)) {
         throw new Error(`MISSING_IMAGE:${config.file}`);
     }
@@ -102,30 +105,33 @@ async function generateMapImage(mapId, markers) {
     const canvas = createCanvas(baseImage.width, baseImage.height);
     const ctx = canvas.getContext('2d');
 
-    // Draw base map
+    // Draw base satellite imagery
     ctx.drawImage(baseImage, 0, 0);
 
     markers.forEach(marker => {
         const { lat, lng, category } = marker;
         
-        // Linear scale logic: (WorldPos / WorldMax) * PixelWidth
+        // Linear scale logic: (WorldPos / WorldRange) * PixelSize
         const x = ((lng - config.bounds.minLng) / (config.bounds.maxLng - config.bounds.minLng)) * baseImage.width;
         const y = ((lat - config.bounds.minLat) / (config.bounds.maxLat - config.bounds.minLat)) * baseImage.height;
 
+        // Categorical color coding
         let color = '#ffffff';
         switch(category?.toLowerCase()) {
-            case 'arc': color = '#ff4757'; break; // Red
-            case 'containers': color = '#1e90ff'; break; // Blue
-            case 'locations': color = '#2ed573'; break; // Green
-            case 'nature': color = '#ffa502'; break; // Orange
-            case 'quests': color = '#eccc68'; break; // Yellow
+            case 'arc': color = '#ff4757'; break; // Red for hostiles
+            case 'containers': color = '#1e90ff'; break; // Blue for loot
+            case 'locations': color = '#2ed573'; break; // Green for POIs
+            case 'nature': color = '#ffa502'; break; // Orange for resources
+            case 'quests': color = '#eccc68'; break; // Yellow for objectives
             default: color = '#ffffff';
         }
 
+        // Draw tactical dot
         ctx.beginPath();
         ctx.arc(x, y, 6, 0, Math.PI * 2);
         ctx.fillStyle = color;
         ctx.fill();
+        // Add shadow/stroke for visibility on complex terrain
         ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
         ctx.lineWidth = 2;
         ctx.stroke();
@@ -144,7 +150,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     console.log(`📥 Received command: /${interaction.commandName} from ${interaction.user.tag}`);
 
-    // Security Guard: Check if the user is authorized
+    // Security Guard: Check if user is authorized administrator
     if (OWNER_ID !== '0' && interaction.user.id !== OWNER_ID) {
         console.log(`🚫 Unauthorized access attempt by ${interaction.user.id}`);
         return interaction.reply({ 
@@ -155,7 +161,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === 'mapview') {
         try {
-            // CALL DEFER IMMEDIATELY TO STOP "NOT RESPONDING"
+            // CRITICAL: Call defer immediately to prevent "Not Responding" timeout
             await interaction.deferReply(); 
 
             const mapID = interaction.options.getString('map');
@@ -164,7 +170,7 @@ client.on(Events.InteractionCreate, async interaction => {
             console.log(`🛰️ Fetching intelligence for map: ${mapID}`);
             const res = await axios.get(apiUrl);
             
-            // Check if API actually returned markers
+            // Validate API data structure
             const markers = Array.isArray(res.data) ? res.data : (res.data.data || []);
 
             if (markers.length === 0) {
@@ -200,7 +206,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 userError = `❌ **Asset Missing:** Map image \`${fileName}\` not found in \`/assets/\` folder.`;
             }
 
-            // Handle reply based on whether it was deferred
+            // Fallback response handling
             if (interaction.deferred) {
                 await interaction.editReply(userError);
             } else {
@@ -210,7 +216,10 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'status') {
-        await interaction.reply({ content: `✅ **Uplink Stable:** Latency is ${client.ws.ping}ms.`, flags: [MessageFlags.Ephemeral] });
+        await interaction.reply({ 
+            content: `✅ **Uplink Stable:** Heartbeat latency is ${client.ws.ping}ms.`, 
+            flags: [MessageFlags.Ephemeral] 
+        });
     }
 });
 
