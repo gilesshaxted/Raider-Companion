@@ -58,7 +58,7 @@ const client = new Client({
 
 const commands = [
     new SlashCommandBuilder()
-        .setName('mapdata') // SYNCED: Renamed from mapview to mapdata to match your logs
+        .setName('mapdata') // Renamed to match your logs
         .setDescription('Generate a visual overlay of tactical map markers')
         .addStringOption(option =>
             option.setName('map')
@@ -100,16 +100,18 @@ async function generateMapImage(mapId, markers) {
     const canvas = createCanvas(baseImage.width, baseImage.height);
     const ctx = canvas.getContext('2d');
 
-    // Draw background
+    // Draw base map
     ctx.drawImage(baseImage, 0, 0);
 
+    // Render tactical markers
     markers.forEach(marker => {
         const { lat, lng, category } = marker;
         
-        // Map world coords to pixel coords
+        // Transform coordinates to pixel space
         const x = ((lng - config.bounds.minLng) / (config.bounds.maxLng - config.bounds.minLng)) * baseImage.width;
         const y = ((lat - config.bounds.minLat) / (config.bounds.maxLat - config.bounds.minLat)) * baseImage.height;
 
+        // Categorical color coding
         let color = '#ffffff';
         switch(category?.toLowerCase()) {
             case 'arc': color = '#ff4757'; break; 
@@ -142,26 +144,26 @@ client.on(Events.InteractionCreate, async interaction => {
 
     console.log(`📥 Received command: /${interaction.commandName} from ${interaction.user.tag}`);
 
-    // Fallback: If command isn't recognized, we must still respond to prevent timeout
-    const handledCommands = ['mapdata', 'status'];
+    // Command Router Logic
+    const handledCommands = ['mapdata', 'mapview', 'status'];
     if (!handledCommands.includes(interaction.commandName)) {
         return interaction.reply({ 
-            content: `❌ Command \`/${interaction.commandName}\` is not yet implemented in this bot version.`, 
+            content: `❌ Command \`/${interaction.commandName}\` is not yet implemented.`, 
             flags: [MessageFlags.Ephemeral] 
         });
     }
 
-    // Security Guard
+    // Security Gate
     if (OWNER_ID !== '0' && interaction.user.id !== OWNER_ID) {
         return interaction.reply({ 
-            content: '⚠️ **Unauthorized Access:** Restricted to administrator.', 
+            content: '⚠️ **Unauthorized Access:** Access restricted to administrator.', 
             flags: [MessageFlags.Ephemeral] 
         });
     }
 
-    if (interaction.commandName === 'mapdata') {
+    if (interaction.commandName === 'mapdata' || interaction.commandName === 'mapview') {
         try {
-            // CRITICAL: deferReply must be the first async action
+            // CRITICAL: Immediately tell Discord we are working on it to prevent timeout
             await interaction.deferReply(); 
 
             const mapID = interaction.options.getString('map');
@@ -169,6 +171,8 @@ client.on(Events.InteractionCreate, async interaction => {
 
             console.log(`🛰️ Fetching data for: ${mapID}`);
             const res = await axios.get(apiUrl);
+            
+            // Robust check for data structure
             const markers = Array.isArray(res.data) ? res.data : (res.data.data || []);
 
             if (markers.length === 0) {
