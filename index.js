@@ -19,6 +19,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OWNER_ID = process.env.OWNER_ID || '0';
 
+// World coordinate boundaries to map pixel space
 const MAP_CONFIG = {
     'dam': {
         file: 'dam_battlegrounds.png',
@@ -58,7 +59,7 @@ const client = new Client({
 
 const commands = [
     new SlashCommandBuilder()
-        .setName('mapdata') // Renamed to match your logs
+        .setName('mapdata')
         .setDescription('Generate a visual overlay of tactical map markers')
         .addStringOption(option =>
             option.setName('map')
@@ -92,6 +93,7 @@ async function generateMapImage(mapId, markers) {
     const config = MAP_CONFIG[mapId];
     const imagePath = path.join(__dirname, 'assets', config.file);
     
+    // Check if asset exists
     if (!fs.existsSync(imagePath)) {
         throw new Error(`MISSING_IMAGE:${config.file}`);
     }
@@ -100,28 +102,29 @@ async function generateMapImage(mapId, markers) {
     const canvas = createCanvas(baseImage.width, baseImage.height);
     const ctx = canvas.getContext('2d');
 
-    // Draw base map
+    // Draw the base map image
     ctx.drawImage(baseImage, 0, 0);
 
-    // Render tactical markers
+    // Render each tactical marker based on its category
     markers.forEach(marker => {
         const { lat, lng, category } = marker;
         
-        // Transform coordinates to pixel space
+        // Scale world coordinates to pixel coordinates
         const x = ((lng - config.bounds.minLng) / (config.bounds.maxLng - config.bounds.minLng)) * baseImage.width;
         const y = ((lat - config.bounds.minLat) / (config.bounds.maxLat - config.bounds.minLat)) * baseImage.height;
 
-        // Categorical color coding
+        // Categorical color coding logic
         let color = '#ffffff';
         switch(category?.toLowerCase()) {
-            case 'arc': color = '#ff4757'; break; 
-            case 'containers': color = '#1e90ff'; break; 
-            case 'locations': color = '#2ed573'; break; 
-            case 'nature': color = '#ffa502'; break;
-            case 'quests': color = '#eccc68'; break;
-            default: color = '#ffffff';
+            case 'arc': color = '#ff4757'; break;      // Red
+            case 'containers': color = '#1e90ff'; break; // Blue
+            case 'locations': color = '#2ed573'; break;  // Green
+            case 'nature': color = '#ffa502'; break;    // Orange
+            case 'quests': color = '#eccc68'; break;    // Gold
+            default: color = '#ffffff';                 // White
         }
 
+        // Draw marker dot
         ctx.beginPath();
         ctx.arc(x, y, 6, 0, Math.PI * 2);
         ctx.fillStyle = color;
@@ -144,16 +147,16 @@ client.on(Events.InteractionCreate, async interaction => {
 
     console.log(`📥 Received command: /${interaction.commandName} from ${interaction.user.tag}`);
 
-    // Command Router Logic
+    // Command Router logic
     const handledCommands = ['mapdata', 'mapview', 'status'];
     if (!handledCommands.includes(interaction.commandName)) {
         return interaction.reply({ 
-            content: `❌ Command \`/${interaction.commandName}\` is not yet implemented.`, 
+            content: `❌ Command \`/${interaction.commandName}\` is not implemented in this version.`, 
             flags: [MessageFlags.Ephemeral] 
         });
     }
 
-    // Security Gate
+    // Security check for administrator access
     if (OWNER_ID !== '0' && interaction.user.id !== OWNER_ID) {
         return interaction.reply({ 
             content: '⚠️ **Unauthorized Access:** Access restricted to administrator.', 
@@ -161,48 +164,63 @@ client.on(Events.InteractionCreate, async interaction => {
         });
     }
 
+    // Execution block for map generation
     if (interaction.commandName === 'mapdata' || interaction.commandName === 'mapview') {
         try {
-            // CRITICAL: Immediately tell Discord we are working on it to prevent timeout
+            // CRITICAL: Immediately defer to prevent "Application Not Responding"
             await interaction.deferReply(); 
 
             const mapID = interaction.options.getString('map');
             const apiUrl = `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapID}`;
 
-            console.log(`🛰️ Fetching data for: ${mapID}`);
+            console.log(`🛰️ Fetching tactical data for: ${mapID}`);
             const res = await axios.get(apiUrl);
             
-            // Robust check for data structure
-            const markers = Array.isArray(res.data) ? res.data : (res.data.data || []);
-
-            if (markers.length === 0) {
-                return interaction.editReply(`⚠️ No marker data found for **${MAP_CONFIG[mapID].name}**.`);
+            // Robust data extraction: checking for raw array or nested data property
+            let markers = [];
+            if (Array.isArray(res.data)) {
+                markers = res.data;
+            } else if (res.data && Array.isArray(res.data.data)) {
+                markers = res.data.data;
+            } else if (res.data && typeof res.data === 'object') {
+                // Fallback: search for any array property in the root object
+                const foundArray = Object.values(res.data).find(val => Array.isArray(val));
+                markers = foundArray || [];
             }
 
-            console.log(`🎨 Rendering ${markers.length} markers...`);
+            if (markers.length === 0) {
+                return interaction.editReply(`⚠️ No marker data found for **${MAP_CONFIG[mapID].name}**. (API returned empty)`);
+            }
+
+            console.log(`🎨 Rendering ${markers.length} markers onto ${MAP_CONFIG[mapID].file}...`);
             const imageBuffer = await generateMapImage(mapID, markers);
             const attachment = new AttachmentBuilder(imageBuffer, { name: `tactical_map.png` });
 
+            // Build rich embed for response
             const embed = new EmbedBuilder()
                 .setTitle(`🗺️ Tactical Overlay: ${MAP_CONFIG[mapID].name}`)
-                .setDescription(`Visualizing **${markers.length}** map features.`)
+                .setDescription(`Visualizing intelligence for **${markers.length}** map points.`)
                 .addFields(
-                    { name: '🔴 ARC', value: 'Hostiles', inline: true },
+                    { name: '🔴 ARC', value: 'Hostiles/Units', inline: true },
                     { name: '🔵 Loot', value: 'Containers', inline: true },
-                    { name: '🟢 POIs', value: 'Extraction/Spawns', inline: true }
+                    { name: '🟢 POIs', value: 'Spawns/Exits', inline: true }
                 )
                 .setColor(0x2f3542)
                 .setImage(`attachment://tactical_map.png`)
-                .setTimestamp();
+                .setTimestamp()
+                .setFooter({ text: 'Raider Companion Intelligence System' });
 
             await interaction.editReply({ embeds: [embed], files: [attachment] });
-            console.log(`✅ Success: ${mapID} delivered.`);
+            console.log(`✅ Success: Visual report for ${mapID} delivered.`);
 
         } catch (err) {
             console.error('❌ Interaction Error:', err);
-            const userError = err.message.startsWith('MISSING_IMAGE') 
-                ? `❌ Map asset \`${err.message.split(':')[1]}\` not found in /assets/ folder.`
-                : "❌ An error occurred during image generation.";
+            
+            let userError = "❌ An internal error occurred during map generation.";
+            if (err.message.startsWith('MISSING_IMAGE')) {
+                const missingFile = err.message.split(':')[1];
+                userError = `❌ Map asset \`${missingFile}\` was not found in the \`/assets/\` folder. Please upload the map image.`;
+            }
             
             if (interaction.deferred) {
                 await interaction.editReply(userError);
@@ -212,9 +230,10 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     }
 
+    // Health check command
     if (interaction.commandName === 'status') {
         await interaction.reply({ 
-            content: `✅ **Uplink Stable:** Latency is ${client.ws.ping}ms.`, 
+            content: `✅ **Uplink Stable:** Heartbeat is ${client.ws.ping}ms. System operational.`, 
             flags: [MessageFlags.Ephemeral] 
         });
     }
