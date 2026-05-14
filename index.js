@@ -6,7 +6,8 @@ const {
     REST, 
     Routes, 
     SlashCommandBuilder,
-    MessageFlags
+    MessageFlags,
+    Events
 } = require('discord.js');
 const axios = require('axios');
 const { createCanvas, loadImage } = require('canvas');
@@ -18,7 +19,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OWNER_ID = process.env.OWNER_ID || '0';
 
-// Update coordinates as you calibrate the world-to-pixel ratio
+// Configuration for World-to-Pixel coordinate scaling
 const MAP_CONFIG = {
     'dam': {
         file: 'dam_battlegrounds.png',
@@ -81,6 +82,7 @@ async function registerCommands() {
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
         console.log('🔄 Started refreshing application (/) commands.');
+        // Global registration (might take a few mins to propagate, use Guild ID for instant test)
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
         console.log('✅ Successfully reloaded application (/) commands.');
     } catch (error) {
@@ -92,7 +94,6 @@ async function generateMapImage(mapId, markers) {
     const config = MAP_CONFIG[mapId];
     const imagePath = path.join(__dirname, 'assets', config.file);
     
-    // Validate file exists before loading
     if (!fs.existsSync(imagePath)) {
         throw new Error(`MISSING_IMAGE:${config.file}`);
     }
@@ -107,7 +108,7 @@ async function generateMapImage(mapId, markers) {
     markers.forEach(marker => {
         const { lat, lng, category } = marker;
         
-        // Relative coordinate math
+        // Linear scale logic: (WorldPos / WorldMax) * PixelWidth
         const x = ((lng - config.bounds.minLng) / (config.bounds.maxLng - config.bounds.minLng)) * baseImage.width;
         const y = ((lat - config.bounds.minLat) / (config.bounds.maxLat - config.bounds.minLat)) * baseImage.height;
 
@@ -133,16 +134,19 @@ async function generateMapImage(mapId, markers) {
     return canvas.toBuffer('image/png');
 }
 
-client.once('ready', () => {
-    console.log(`📡 Uplink established. Logged in as ${client.user.tag}`);
+client.once(Events.ClientReady, (c) => {
+    console.log(`📡 Uplink established. Logged in as ${c.user.tag}`);
     registerCommands();
 });
 
-client.on('interactionCreate', async interaction => {
+client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    // Security Guard
+    console.log(`📥 Received command: /${interaction.commandName} from ${interaction.user.tag}`);
+
+    // Security Guard: Check if the user is authorized
     if (OWNER_ID !== '0' && interaction.user.id !== OWNER_ID) {
+        console.log(`🚫 Unauthorized access attempt by ${interaction.user.id}`);
         return interaction.reply({ 
             content: '⚠️ **Unauthorized Access:** This command is restricted to the administrator.', 
             flags: [MessageFlags.Ephemeral] 
@@ -151,13 +155,16 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.commandName === 'mapview') {
         try {
-            await interaction.deferReply(); // Immediate deferral to prevent timeout
+            // CALL DEFER IMMEDIATELY TO STOP "NOT RESPONDING"
+            await interaction.deferReply(); 
 
             const mapID = interaction.options.getString('map');
             const apiUrl = `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapID}`;
 
             console.log(`🛰️ Fetching intelligence for map: ${mapID}`);
             const res = await axios.get(apiUrl);
+            
+            // Check if API actually returned markers
             const markers = Array.isArray(res.data) ? res.data : (res.data.data || []);
 
             if (markers.length === 0) {
@@ -193,6 +200,7 @@ client.on('interactionCreate', async interaction => {
                 userError = `❌ **Asset Missing:** Map image \`${fileName}\` not found in \`/assets/\` folder.`;
             }
 
+            // Handle reply based on whether it was deferred
             if (interaction.deferred) {
                 await interaction.editReply(userError);
             } else {
