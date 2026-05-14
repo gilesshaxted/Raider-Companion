@@ -19,8 +19,6 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OWNER_ID = process.env.OWNER_ID || '0';
 
-// World-to-Pixel scaling configuration
-// Note: maxLat/maxLng define the 'virtual' size of the game world for scaling
 const MAP_CONFIG = {
     'dam': {
         file: 'dam_battlegrounds.png',
@@ -58,10 +56,9 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds]
 });
 
-// We define /mapview as the primary command for the overlay
 const commands = [
     new SlashCommandBuilder()
-        .setName('mapview')
+        .setName('mapdata') // SYNCED: Renamed from mapview to mapdata to match your logs
         .setDescription('Generate a visual overlay of tactical map markers')
         .addStringOption(option =>
             option.setName('map')
@@ -84,7 +81,6 @@ async function registerCommands() {
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
         console.log('🔄 Started refreshing application (/) commands.');
-        // Global registration
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
         console.log('✅ Successfully reloaded application (/) commands.');
     } catch (error) {
@@ -96,7 +92,6 @@ async function generateMapImage(mapId, markers) {
     const config = MAP_CONFIG[mapId];
     const imagePath = path.join(__dirname, 'assets', config.file);
     
-    // Safety check for asset existence
     if (!fs.existsSync(imagePath)) {
         throw new Error(`MISSING_IMAGE:${config.file}`);
     }
@@ -105,33 +100,30 @@ async function generateMapImage(mapId, markers) {
     const canvas = createCanvas(baseImage.width, baseImage.height);
     const ctx = canvas.getContext('2d');
 
-    // Draw base satellite imagery
+    // Draw background
     ctx.drawImage(baseImage, 0, 0);
 
     markers.forEach(marker => {
         const { lat, lng, category } = marker;
         
-        // Linear scale logic: (WorldPos / WorldRange) * PixelSize
+        // Map world coords to pixel coords
         const x = ((lng - config.bounds.minLng) / (config.bounds.maxLng - config.bounds.minLng)) * baseImage.width;
         const y = ((lat - config.bounds.minLat) / (config.bounds.maxLat - config.bounds.minLat)) * baseImage.height;
 
-        // Categorical color coding
         let color = '#ffffff';
         switch(category?.toLowerCase()) {
-            case 'arc': color = '#ff4757'; break; // Red for hostiles
-            case 'containers': color = '#1e90ff'; break; // Blue for loot
-            case 'locations': color = '#2ed573'; break; // Green for POIs
-            case 'nature': color = '#ffa502'; break; // Orange for resources
-            case 'quests': color = '#eccc68'; break; // Yellow for objectives
+            case 'arc': color = '#ff4757'; break; 
+            case 'containers': color = '#1e90ff'; break; 
+            case 'locations': color = '#2ed573'; break; 
+            case 'nature': color = '#ffa502'; break;
+            case 'quests': color = '#eccc68'; break;
             default: color = '#ffffff';
         }
 
-        // Draw tactical dot
         ctx.beginPath();
         ctx.arc(x, y, 6, 0, Math.PI * 2);
         ctx.fillStyle = color;
         ctx.fill();
-        // Add shadow/stroke for visibility on complex terrain
         ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
         ctx.lineWidth = 2;
         ctx.stroke();
@@ -150,27 +142,33 @@ client.on(Events.InteractionCreate, async interaction => {
 
     console.log(`📥 Received command: /${interaction.commandName} from ${interaction.user.tag}`);
 
-    // Security Guard: Check if user is authorized administrator
-    if (OWNER_ID !== '0' && interaction.user.id !== OWNER_ID) {
-        console.log(`🚫 Unauthorized access attempt by ${interaction.user.id}`);
+    // Fallback: If command isn't recognized, we must still respond to prevent timeout
+    const handledCommands = ['mapdata', 'status'];
+    if (!handledCommands.includes(interaction.commandName)) {
         return interaction.reply({ 
-            content: '⚠️ **Unauthorized Access:** This command is restricted to the administrator.', 
+            content: `❌ Command \`/${interaction.commandName}\` is not yet implemented in this bot version.`, 
             flags: [MessageFlags.Ephemeral] 
         });
     }
 
-    if (interaction.commandName === 'mapview') {
+    // Security Guard
+    if (OWNER_ID !== '0' && interaction.user.id !== OWNER_ID) {
+        return interaction.reply({ 
+            content: '⚠️ **Unauthorized Access:** Restricted to administrator.', 
+            flags: [MessageFlags.Ephemeral] 
+        });
+    }
+
+    if (interaction.commandName === 'mapdata') {
         try {
-            // CRITICAL: Call defer immediately to prevent "Not Responding" timeout
+            // CRITICAL: deferReply must be the first async action
             await interaction.deferReply(); 
 
             const mapID = interaction.options.getString('map');
             const apiUrl = `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapID}`;
 
-            console.log(`🛰️ Fetching intelligence for map: ${mapID}`);
+            console.log(`🛰️ Fetching data for: ${mapID}`);
             const res = await axios.get(apiUrl);
-            
-            // Validate API data structure
             const markers = Array.isArray(res.data) ? res.data : (res.data.data || []);
 
             if (markers.length === 0) {
@@ -183,30 +181,25 @@ client.on(Events.InteractionCreate, async interaction => {
 
             const embed = new EmbedBuilder()
                 .setTitle(`🗺️ Tactical Overlay: ${MAP_CONFIG[mapID].name}`)
-                .setDescription(`Rendered **${markers.length}** points of interest onto satellite imagery.`)
+                .setDescription(`Visualizing **${markers.length}** map features.`)
                 .addFields(
                     { name: '🔴 ARC', value: 'Hostiles', inline: true },
                     { name: '🔵 Loot', value: 'Containers', inline: true },
-                    { name: '🟢 POIs', value: 'Spawns/Exfil', inline: true }
+                    { name: '🟢 POIs', value: 'Extraction/Spawns', inline: true }
                 )
                 .setColor(0x2f3542)
                 .setImage(`attachment://tactical_map.png`)
-                .setFooter({ text: "Raider Companion Bot | Operational Intelligence" })
                 .setTimestamp();
 
             await interaction.editReply({ embeds: [embed], files: [attachment] });
-            console.log(`✅ Map delivered successfully.`);
+            console.log(`✅ Success: ${mapID} delivered.`);
 
         } catch (err) {
             console.error('❌ Interaction Error:', err);
+            const userError = err.message.startsWith('MISSING_IMAGE') 
+                ? `❌ Map asset \`${err.message.split(':')[1]}\` not found in /assets/ folder.`
+                : "❌ An error occurred during image generation.";
             
-            let userError = "❌ **Operation Failed:** An internal error occurred.";
-            if (err.message.startsWith('MISSING_IMAGE')) {
-                const fileName = err.message.split(':')[1];
-                userError = `❌ **Asset Missing:** Map image \`${fileName}\` not found in \`/assets/\` folder.`;
-            }
-
-            // Fallback response handling
             if (interaction.deferred) {
                 await interaction.editReply(userError);
             } else {
@@ -217,7 +210,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === 'status') {
         await interaction.reply({ 
-            content: `✅ **Uplink Stable:** Heartbeat latency is ${client.ws.ping}ms.`, 
+            content: `✅ **Uplink Stable:** Latency is ${client.ws.ping}ms.`, 
             flags: [MessageFlags.Ephemeral] 
         });
     }
