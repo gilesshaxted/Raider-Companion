@@ -1,658 +1,982 @@
-const {
-    Client,
-    GatewayIntentBits,
-    EmbedBuilder,
+require('dotenv').config();
+const { 
+    Client, 
+    GatewayIntentBits, 
+    EmbedBuilder, 
+    REST, 
+    Routes, 
+    SlashCommandBuilder, 
+    PermissionFlagsBits,
+    Events,
+    ActionRowBuilder, 
+    StringSelectMenuBuilder,
+    ChannelSelectMenuBuilder,
+    ChannelType,
+    GuildScheduledEventPrivacyLevel,
+    GuildScheduledEventEntityType,
+    ActivityType,
+    Partials,
     AttachmentBuilder,
-    REST,
-    Routes,
-    SlashCommandBuilder,
-    MessageFlags,
-    Events
+    ButtonBuilder,
+    ButtonStyle,
+    ModalBuilder,
+    TextInputBuilder,
+    TextInputStyle,
+    MessageFlags 
 } = require('discord.js');
 const axios = require('axios');
-const { createCanvas, loadImage } = require('canvas');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
 
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const OWNER_ID = process.env.OWNER_ID || '0';
+// --- FIREBASE WEB SDK SETUP ---
+const { initializeApp } = require('firebase/app');
+const { initializeFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, query } = require('firebase/firestore');
+const { getAuth, signInAnonymously } = require('firebase/auth');
 
-// ─── Map Configuration ──────────────────────────────────────────────────────
-// mapFile    → full map image from /maps/ (drawn on canvas)
-// thumbnail  → small preview image from /assets/ (used in Discord embed thumbnail)
-// zlayers: 2147483647 = surface, 1 = underground/lower level
-//
-// bounds: world coordinate of pixel (0,0) top-left corner of the map image.
-//   minLng = world lng at left edge of image
-//   minLat = world lat at top edge of image
-//   scaleX = pixels per lng unit  (calibrated from known pixel<->coord pairs)
-//   scaleY = pixels per lat unit
-//
-// To calibrate a new map: pick 2 landmarks, note their pixel pos on the image
-// and their lat/lng from the API, then solve:
-//   scaleX = (px2.x - px1.x) / (lng2 - lng1)
-//   scaleY = (px2.y - px1.y) / (lat2 - lat1)
-//   minLng = lng1 - px1.x / scaleX
-//   minLat = lat1 - px1.y / scaleY
-//
-// Maps not yet calibrated use calibrated:false and fall back to data-range fit.
-const MAP_CONFIG = {
-    dam: {
-        name: 'Dam Battlegrounds',
-        apiSlug: 'dam',
-        thumbnail: 'dam_battlegrounds.png',
-        layers: {
-            2147483647: { file: 'Dam_Battlegrounds_Map.jpg', label: 'Surface' },
-            1:          { file: 'Dam_Battlegrounds_Map.jpg', label: 'Underground' }
-        },
-        // Calibrated: South Swamp Outpost px(1046,1642)→(lat:2838.94,lng:2682.81)
-        //             Spillway Hatch       px(2919,1710)→(lat:2924,lng:4916)
-        calibrated: true,
-        bounds: { minLat: 784.9912, minLng: 1435.6574, scaleX: 0.838711, scaleY: 0.799436 }
-    },
-    sector_zero: {
-        name: 'Buried City',
-        apiSlug: 'buried-city',
-        thumbnail: 'buried_city.png',
-        layers: {
-            2147483647: { file: 'Buried_City_Map.jpg', label: 'Surface' }
-        },
-        calibrated: false,
-        bounds: { minLat: 0, minLng: 0, scaleX: null, scaleY: null }
-    },
-    stella_montis: {
-        name: 'Stella Montis',
-        apiSlug: 'stella-montis',
-        thumbnail: 'stella_montis.png',
-        layers: {
-            2147483647: { file: 'Stella_Montis_Upper_Level_Map.jpg', label: 'Upper Level' },
-            1:          { file: 'Stella_Montis_Lower_Level_Map.jpg', label: 'Lower Level' }
-        },
-        calibrated: false,
-        bounds: { minLat: 0, minLng: 0, scaleX: null, scaleY: null }
-    },
-    spaceport: {
-        name: 'Spaceport',
-        apiSlug: 'spaceport',
-        thumbnail: 'spaceport.png',
-        layers: {
-            2147483647: { file: 'Spaceport_Map.jpg', label: 'Surface' },
-            1:          { file: 'Spaceport_Underground_Map.jpg', label: 'Underground' }
-        },
-        calibrated: false,
-        bounds: { minLat: 0, minLng: 0, scaleX: null, scaleY: null }
-    },
-    blue_gate: {
-        name: 'Blue Gate',
-        apiSlug: 'blue-gate',
-        thumbnail: 'blue_gate.png',
-        layers: {
-            2147483647: { file: 'Blue_Gate_Map.jpg', label: 'Surface' },
-            1:          { file: 'Blue_Gate_Underground_Map.jpg', label: 'Underground' }
-        },
-        calibrated: false,
-        bounds: { minLat: 0, minLng: 0, scaleX: null, scaleY: null }
-    },
-    riven_tides: {
-        name: 'Riven Tides',
-        apiSlug: 'riven-tides',
-        thumbnail: null,
-        layers: {
-            2147483647: { file: 'Riven_Tides_Map.jpg', label: 'Surface' }
-        },
-        calibrated: false,
-        bounds: { minLat: 0, minLng: 0, scaleX: null, scaleY: null }
-    }
+const firebaseConfig = {
+    apiKey: process.env.FIREBASE_API_KEY,
+    authDomain: process.env.FIREBASE_AUTH_DOMAIN,
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
+    appId: process.env.FIREBASE_APP_ID
 };
 
-// ─── Marker Visual Definitions ───────────────────────────────────────────────
-// Each entry defines: color, size, shape ('circle'|'square'|'diamond'|'triangle'), label
-const MARKER_STYLES = {
-    // ARC enemies
-    'arc:tick':         { color: '#ff4757', size: 5,  shape: 'circle',   label: 'Tick' },
-    'arc:pop':          { color: '#ff6b81', size: 5,  shape: 'circle',   label: 'Pop' },
-    'arc:fireball':     { color: '#ff7f50', size: 5,  shape: 'circle',   label: 'Fireball' },
-    'arc:rocketeer':    { color: '#ff0000', size: 7,  shape: 'diamond',  label: 'Rocketeer' },
-    'arc:turret':       { color: '#c0392b', size: 8,  shape: 'square',   label: 'Turret' },
-    'arc:rollbot':      { color: '#e74c3c', size: 6,  shape: 'diamond',  label: 'Rollbot' },
-    'arc:wasp':         { color: '#ff6348', size: 6,  shape: 'circle',   label: 'Wasp' },
-    'arc:hornet ':      { color: '#e55039', size: 7,  shape: 'triangle', label: 'Hornet' },
-    'arc:bastion':      { color: '#c0392b', size: 9,  shape: 'square',   label: 'Bastion' },
-    'arc:sentinel':     { color: '#96281b', size: 9,  shape: 'diamond',  label: 'Sentinel' },
-    'arc:queen':        { color: '#7b241c', size: 12, shape: 'diamond',  label: '👑 Queen' },
-    'arc:bison':        { color: '#b03a2e', size: 10, shape: 'triangle', label: 'Bison' },
-    'arc:bombardier':   { color: '#e74c3c', size: 7,  shape: 'triangle', label: 'Bombardier' },
-    'arc:snitch':       { color: '#f1948a', size: 5,  shape: 'circle',   label: 'Snitch' },
-    'arc:matriarch':    { color: '#641e16', size: 13, shape: 'diamond',  label: '⚡ Matriarch' },
-    'arc:comet':        { color: '#ff6b35', size: 7,  shape: 'diamond',  label: 'Comet' },
-    'arc:firefly':      { color: '#ffa07a', size: 5,  shape: 'circle',   label: 'Firefly' },
-    'arc:shredder':     { color: '#dc143c', size: 8,  shape: 'square',   label: 'Shredder' },
-    'arc:turbine':      { color: '#b22222', size: 8,  shape: 'diamond',  label: 'Turbine' },
-    'arc:vaporizer':    { color: '#8b0000', size: 9,  shape: 'triangle', label: 'Vaporizer' },
+const app = initializeApp(firebaseConfig);
 
-    // Containers
-    'containers:base_container':      { color: '#1e90ff', size: 4,  shape: 'circle',  label: 'Container' },
-    'containers:breachable_container':{ color: '#00bfff', size: 5,  shape: 'square',  label: 'Breachable' },
-    'containers:ammo_crate':          { color: '#ffd700', size: 6,  shape: 'square',  label: 'Ammo' },
-    'containers:med_crate':           { color: '#00ff7f', size: 6,  shape: 'square',  label: 'Med' },
-    'containers:weapon_case':         { color: '#da70d6', size: 7,  shape: 'diamond', label: 'Weapon Case' },
-    'containers:locker':              { color: '#87ceeb', size: 5,  shape: 'square',  label: 'Locker' },
-    'containers:arc_courier':         { color: '#ff4500', size: 6,  shape: 'circle',  label: 'Arc Courier' },
-    'containers:arc_probe':           { color: '#ff6347', size: 6,  shape: 'circle',  label: 'Arc Probe' },
-    'containers:raider_cache':        { color: '#daa520', size: 6,  shape: 'diamond', label: 'Raider Cache' },
-    'containers:utility_crate':       { color: '#20b2aa', size: 5,  shape: 'square',  label: 'Utility' },
-    'containers:baron_husk':          { color: '#9370db', size: 7,  shape: 'diamond', label: 'Baron Husk' },
-    'containers:wasp_husk':           { color: '#cd853f', size: 6,  shape: 'diamond', label: 'Wasp Husk' },
-    'containers:rocketeer_husk':      { color: '#b8860b', size: 6,  shape: 'diamond', label: 'Rocketeer Husk' },
-    'containers:security_breach':     { color: '#ff1493', size: 7,  shape: 'square',  label: 'Security Breach' },
-    'containers:hurricane_cache':     { color: '#00ced1', size: 7,  shape: 'diamond', label: 'Hurricane Cache' },
-    'containers:combat_supplies':     { color: '#ff8c00', size: 7,  shape: 'square',  label: 'Combat Supplies' },
-    'containers:basket':              { color: '#90ee90', size: 4,  shape: 'circle',  label: 'Basket' },
-    'containers:bag':                 { color: '#8fbc8f', size: 4,  shape: 'circle',  label: 'Bag' },
-    'containers:car':                 { color: '#708090', size: 5,  shape: 'square',  label: 'Vehicle' },
+// HARDENED FIRESTORE CONFIGURATION
+// Switched to Long Polling to prevent RST_STREAM errors in long-running cloud environments
+const db = initializeFirestore(app, {
+    experimentalForceLongPolling: true,
+});
 
-    // Locations
-    'locations:player_spawn':    { color: '#2ed573', size: 7,  shape: 'triangle', label: 'Spawn' },
-    'locations:extraction':      { color: '#7bed9f', size: 9,  shape: 'triangle', label: '✈ Extract' },
-    'locations:supply_station':  { color: '#5352ed', size: 7,  shape: 'square',   label: 'Supply Station' },
-    'locations:field_depot':     { color: '#3742fa', size: 6,  shape: 'square',   label: 'Field Depot' },
-    'locations:raider_camp':     { color: '#eccc68', size: 7,  shape: 'diamond',  label: 'Raider Camp' },
-    'locations:locked_room':     { color: '#ff6b81', size: 7,  shape: 'square',   label: '🔒 Key Room' },
-    'locations:field_crate':     { color: '#a4b0be', size: 5,  shape: 'square',   label: 'Field Crate' },
-    'locations:hatch':           { color: '#ff4500', size: 8,  shape: 'triangle', label: 'Hatch' },
-    'locations:breach_room':     { color: '#ff69b4', size: 7,  shape: 'square',   label: 'Breach Room' },
-    'locations:fuel-cell':       { color: '#00ffff', size: 7,  shape: 'circle',   label: 'Fuel Cell' },
-    'locations:button':          { color: '#adff2f', size: 6,  shape: 'circle',   label: 'Button' },
+const auth = getAuth(app);
+const appId = 'raider-companion';
+const OWNER_ID = '444211741774184458';
 
-    // Nature
-    'nature:mushroom':     { color: '#ffa502', size: 4, shape: 'circle', label: 'Mushroom' },
-    'nature:prickly-pear': { color: '#a4c639', size: 4, shape: 'circle', label: 'Prickly Pear' },
-    'nature:agave':        { color: '#4cbb17', size: 4, shape: 'circle', label: 'Agave' },
-    'nature:great-mullein':{ color: '#9acd32', size: 4, shape: 'circle', label: 'Mullein' },
-    'nature:apricot':      { color: '#ffb347', size: 4, shape: 'circle', label: 'Apricot' },
-    'nature:candleberries':{ color: '#ff69b4', size: 5, shape: 'circle', label: 'Candleberries' },
-    'nature:moss':         { color: '#6b8e23', size: 4, shape: 'circle', label: 'Moss' },
-    'nature:roots':        { color: '#8b4513', size: 4, shape: 'circle', label: 'Roots' },
-    'nature:fertilizer':   { color: '#a0522d', size: 4, shape: 'circle', label: 'Fertilizer' },
+// --- CONFIGURATION VALIDATION ---
+const requiredEnvVars = [
+    'FIREBASE_API_KEY',
+    'FIREBASE_AUTH_DOMAIN',
+    'FIREBASE_PROJECT_ID',
+    'FIREBASE_STORAGE_BUCKET',
+    'FIREBASE_MESSAGING_SENDER_ID',
+    'FIREBASE_APP_ID',
+    'DISCORD_TOKEN',
+    'CLIENT_ID'
+];
 
-    // Quests
-    'quests:untended-garden':       { color: '#eccc68', size: 7, shape: 'diamond', label: 'Quest' },
-    'quests:broken-monument':       { color: '#eccc68', size: 7, shape: 'diamond', label: 'Quest' },
-    'quests:straight-record':       { color: '#eccc68', size: 7, shape: 'diamond', label: 'Quest' },
-    'quests:keeping-the-memory':    { color: '#eccc68', size: 7, shape: 'diamond', label: 'Quest' },
-    'quests:a-symbol-of-unification':{ color: '#eccc68', size: 7, shape: 'diamond', label: 'Quest' },
-    'quests:espresso':              { color: '#d4a017', size: 7, shape: 'diamond', label: 'Quest' },
-    'quests:paving-the-way':        { color: '#d4a017', size: 7, shape: 'diamond', label: 'Quest' },
-    'quests:the-league':            { color: '#d4a017', size: 7, shape: 'diamond', label: 'Quest' },
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+    console.error('❌ CRITICAL ERROR: Missing required Environment Variables:');
+    missingVars.forEach(v => console.error(`   - ${v}`));
+    process.exit(1); 
+}
 
-    // Events
-    'events:harvester':     { color: '#ff6b35', size: 9, shape: 'diamond', label: '⚡ Harvester' },
-    'events:snow_pile':     { color: '#b0e0e6', size: 5, shape: 'circle',  label: 'Snow Pile' },
-    'events:assessor':      { color: '#ff4500', size: 8, shape: 'diamond', label: 'Assessor' },
-    'events:ship_model':    { color: '#add8e6', size: 5, shape: 'circle',  label: 'Ship Model' }
+// --- KOYEB HEALTH CHECK SERVER ---
+const PORT = process.env.PORT || 8000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running\n');
+}).listen(PORT, () => console.log(`Health check server listening on port ${PORT}`));
+
+// --- BOT SETTINGS ---
+const TOKEN = process.env.DISCORD_TOKEN.trim();
+const CLIENT_ID = process.env.CLIENT_ID.trim();
+const API_URL = 'https://metaforge.app/api/arc-raiders/events-schedule';
+const ARCS_API_URL = 'https://metaforge.app/api/arc-raiders/arcs';
+const ITEMS_API_URL = 'https://metaforge.app/api/arc-raiders/items?limit=1000';
+const TRADERS_API_URL = 'https://metaforge.app/api/arc-raiders/traders';
+const QUESTS_API_URL = 'https://metaforge.app/api/arc-raiders/quests';
+const CHECK_INTERVAL = 60000;
+
+let guildConfigs = new Map();
+let activeGuildUpdates = new Set(); 
+
+const mapConfigs = {
+    'Dam':          { color: 0x3498db, fileName: 'dam_battlegrounds.png' },
+    'Buried City':  { color: 0xe67e22, fileName: 'buried_city.png' },
+    'Blue Gate':    { color: 0x9b59b6, fileName: 'blue_gate.png' },
+    'Spaceport':    { color: 0x2ecc71, fileName: 'spaceport.png' },
+    'Stella Montis':{ color: 0xf1c40f, fileName: 'stella_montis.png' },
+    'Riven Tides':  { color: 0x1abc9c, fileName: 'riven_tides.png' }   // Added
 };
 
-// Category-level fallback styles
-const CATEGORY_FALLBACK = {
-    arc:        { color: '#ff4757', size: 5,  shape: 'circle'  },
-    containers: { color: '#1e90ff', size: 5,  shape: 'square'  },
-    locations:  { color: '#2ed573', size: 6,  shape: 'triangle'},
-    nature:     { color: '#ffa502', size: 4,  shape: 'circle'  },
-    quests:     { color: '#eccc68', size: 7,  shape: 'diamond' },
-    events:     { color: '#ff6b35', size: 7,  shape: 'diamond' }
+const rarityColors = {
+    'Common': 0x95a5a6, 'Uncommon': 0x2ecc71, 'Rare': 0x3498db, 'Epic': 0x9b59b6, 'Legendary': 0xf1c40f
 };
 
-function getMarkerStyle(category, subcategory) {
-    const key = `${category}:${subcategory}`;
-    return MARKER_STYLES[key] || CATEGORY_FALLBACK[category] || { color: '#ffffff', size: 5, shape: 'circle' };
-}
+const eventEmojis = {
+    'Night Raid':           '🌙',
+    'Prospecting Probes':   '📡',
+    'Matriarch':            '👑',
+    'Bird City':            '🐦',
+    'Hidden Bunker':        '🏢',
+    'Cold Snap':            '❄️',
+    'Harvester':            '🚜',
+    'Electromagnetic Storm':'⚡',
+    'Lush Blooms':          '🌸',
+    'Locked Gate':          '🔒',
+    'Launch Tower Loot':    '🚀',
+    'Uncovered Caches':     '📦',
+    'Hurricane':            '🌀',   // Added
+    'Beachcombing':         '🏖️',  // Added
+    'Close Scrutiny':       '🔍'   // Added
+};
 
-// ─── Canvas Drawing Helpers ──────────────────────────────────────────────────
-function drawMarker(ctx, x, y, style, locked = false) {
-    const { color, size, shape } = style;
+const notificationTimes = [
+    { label: '3 Hours',    value: '10800000' },
+    { label: '2 Hours',    value: '7200000'  },
+    { label: '1 Hour',     value: '3600000'  },
+    { label: '45 Minutes', value: '2700000'  },
+    { label: '30 Minutes', value: '1800000'  },
+    { label: '15 Minutes', value: '900000'   }
+];
 
-    ctx.save();
+const getEmoji = (name) => eventEmojis[name] || '🛸';
 
-    if (shape === 'circle') {
-        ctx.beginPath();
-        ctx.arc(x, y, size, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-    } else if (shape === 'square') {
-        ctx.fillStyle = color;
-        ctx.fillRect(x - size, y - size, size * 2, size * 2);
-    } else if (shape === 'diamond') {
-        ctx.beginPath();
-        ctx.moveTo(x, y - size * 1.3);
-        ctx.lineTo(x + size, y);
-        ctx.lineTo(x, y + size * 1.3);
-        ctx.lineTo(x - size, y);
-        ctx.closePath();
-        ctx.fillStyle = color;
-        ctx.fill();
-    } else if (shape === 'triangle') {
-        ctx.beginPath();
-        ctx.moveTo(x, y - size * 1.3);
-        ctx.lineTo(x + size * 1.1, y + size);
-        ctx.lineTo(x - size * 1.1, y + size);
-        ctx.closePath();
-        ctx.fillStyle = color;
-        ctx.fill();
-    }
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildScheduledEvents,
+        GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildPresences
+    ],
+    partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.Channel]
+});
 
-    // Black border
-    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
+client.on(Events.Error, error => {
+    console.error('⚠️ Discord Client Error:', error.message);
+});
 
-    // Lock indicator for behindLockedDoor
-    if (locked) {
-        ctx.font = `${Math.max(8, size)}px Arial`;
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText('🔒', x + size, y - size);
-    }
+let arcCache = [], itemCache = [], traderCache = {}, traderItemsFlat = [], traderCategories = [], questCache = [];
+let isAuthorized = false, isGlobalUpdating = false;
 
-    ctx.restore();
-}
-
-function drawLegend(ctx, usedStyles) {
-    const padding = 10;
-    const itemH = 18;
-    const boxW = 170;
-    const boxH = padding * 2 + usedStyles.length * itemH;
-    const startX = ctx.canvas.width - boxW - 10;
-    const startY = 10;
-
-    // Semi-transparent background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
-    ctx.fillRect(startX, startY, boxW, boxH);
-    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(startX, startY, boxW, boxH);
-
-    usedStyles.forEach(({ label, color, shape, size }, i) => {
-        const y = startY + padding + i * itemH + itemH / 2;
-        const x = startX + padding + 8;
-
-        // Mini marker
-        ctx.save();
-        const miniSize = 5;
-        if (shape === 'circle') {
-            ctx.beginPath();
-            ctx.arc(x, y, miniSize, 0, Math.PI * 2);
-            ctx.fillStyle = color;
-            ctx.fill();
-        } else if (shape === 'square') {
-            ctx.fillStyle = color;
-            ctx.fillRect(x - miniSize, y - miniSize, miniSize * 2, miniSize * 2);
-        } else if (shape === 'diamond') {
-            ctx.beginPath();
-            ctx.moveTo(x, y - miniSize * 1.3);
-            ctx.lineTo(x + miniSize, y);
-            ctx.lineTo(x, y + miniSize * 1.3);
-            ctx.lineTo(x - miniSize, y);
-            ctx.closePath();
-            ctx.fillStyle = color;
-            ctx.fill();
-        } else if (shape === 'triangle') {
-            ctx.beginPath();
-            ctx.moveTo(x, y - miniSize * 1.3);
-            ctx.lineTo(x + miniSize * 1.1, y + miniSize);
-            ctx.lineTo(x - miniSize * 1.1, y + miniSize);
-            ctx.closePath();
-            ctx.fillStyle = color;
-            ctx.fill();
-        }
-        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.restore();
-
-        // Label
-        ctx.fillStyle = '#ffffff';
-        ctx.font = '11px Arial';
-        ctx.fillText(label, x + 12, y + 4);
-    });
-}
-
-// ─── Core Image Generation ───────────────────────────────────────────────────
-async function generateMapImage(mapId, markers, categoryFilter, layerKey) {
-    const config = MAP_CONFIG[mapId];
-    const layerConfig = config.layers[layerKey] || Object.values(config.layers)[0];
-    const imagePath = path.join(__dirname, 'maps', layerConfig.file);
-
-    if (!fs.existsSync(imagePath)) {
-        throw new Error(`MISSING_IMAGE:${layerConfig.file}`);
-    }
-
-    const baseImage = await loadImage(imagePath);
-    const canvas = createCanvas(baseImage.width, baseImage.height);
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(baseImage, 0, 0);
-
-    // Resolve coordinate transform
-    let scaleX, scaleY, minLng, minLat;
-    if (config.calibrated) {
-        // Use calibrated pixel-per-unit scales and image-edge world coords
-        ({ scaleX, scaleY, minLng, minLat } = config.bounds);
-    } else {
-        // Fallback: fit data range to image — rough but avoids blank renders
-        const lats = markers.map(m => m.lat).filter(Boolean);
-        const lngs = markers.map(m => m.lng).filter(Boolean);
-        minLat = Math.min(...lats);
-        minLng = Math.min(...lngs);
-        const maxLat = Math.max(...lats);
-        const maxLng = Math.max(...lngs);
-        const padding = 0.05; // 5% padding
-        const latSpan = (maxLat - minLat) * (1 + padding * 2);
-        const lngSpan = (maxLng - minLng) * (1 + padding * 2);
-        minLat -= (maxLat - minLat) * padding;
-        minLng -= (maxLng - minLng) * padding;
-        scaleX = baseImage.width  / lngSpan;
-        scaleY = baseImage.height / latSpan;
-        console.log(`⚠️  ${config.name} not calibrated — using data-range fit`);
-    }
-
-    // Filter markers by category and zlayer
-    const filtered = markers.filter(m => {
-        const catMatch = categoryFilter === 'all' || m.category === categoryFilter;
-        // layerKey 1 = underground (zlayers === 1), surface = everything else
-        const layerMatch = layerKey === 1 ? m.zlayers === 1 : m.zlayers !== 1;
-        return catMatch && layerMatch;
-    });
-
-    // Track which styles are actually used for the legend
-    const usedStyleMap = new Map();
-
-    filtered.forEach(marker => {
-        const { lat, lng, category, behindLockedDoor } = marker;
-        const subcategory = marker.subcategory || marker.item_id || 'unknown';
-        const x = (lng - minLng) * scaleX;
-        const y = (lat - minLat) * scaleY;
-        const style = getMarkerStyle(category, subcategory);
-
-        drawMarker(ctx, x, y, style, behindLockedDoor);
-
-        const key = `${category}:${subcategory}`;
-        if (!usedStyleMap.has(key)) {
-            usedStyleMap.set(key, { ...style, label: style.label || subcategory });
-        }
-    });
-
-    // Draw legend if not too many types
-    const usedStyles = [...usedStyleMap.values()];
-    if (usedStyles.length <= 25) {
-        drawLegend(ctx, usedStyles);
-    }
-
-    // Draw info bar at top
-    ctx.fillStyle = 'rgba(0,0,0,0.7)';
-    ctx.fillRect(0, 0, baseImage.width, 28);
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 14px Arial';
-    ctx.fillText(`${config.name} — ${layerConfig.label} — ${filtered.length} markers`, 10, 19);
-
-    // Output as JPEG — Discord's limit is 8MB. Always scale to MAX_SIDE.
-    const MAX_SIDE = 1500;
-    const scale = Math.min(MAX_SIDE / baseImage.width, MAX_SIDE / baseImage.height, 1);
-    const w2 = Math.round(baseImage.width * scale);
-    const h2 = Math.round(baseImage.height * scale);
-    const scaled = createCanvas(w2, h2);
-    scaled.getContext('2d').drawImage(canvas, 0, 0, w2, h2);
-    const buf = scaled.toBuffer('image/jpeg', { quality: 0.75 });
-    console.log(`🖼️ Output: ${w2}x${h2}px, ${(buf.length / 1024 / 1024).toFixed(2)}MB`);
-    return buf;
-}
-
-// ─── Statistics Helper ───────────────────────────────────────────────────────
-function buildStats(markers) {
-    const counts = {};
-    markers.forEach(m => {
-        const key = m.category || 'unknown';
-        counts[key] = (counts[key] || 0) + 1;
-    });
-    return counts;
-}
-
-// ─── Discord Setup ───────────────────────────────────────────────────────────
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-const commands = [
-    new SlashCommandBuilder()
-        .setName('mapview')
-        .setDescription('Generate a visual overlay of tactical map markers')
-        .addStringOption(o =>
-            o.setName('map')
-                .setDescription('Map to render')
-                .setRequired(true)
-                .addChoices(
-                    { name: 'Dam Battlegrounds', value: 'dam' },
-                    { name: 'Buried City',        value: 'sector_zero' },
-                    { name: 'Stella Montis',      value: 'stella_montis' },
-                    { name: 'Spaceport',          value: 'spaceport' },
-                    { name: 'Blue Gate',          value: 'blue_gate' },
-                    { name: 'Riven Tides',        value: 'riven_tides' }
-                ))
-        .addStringOption(o =>
-            o.setName('category')
-                .setDescription('Filter by marker category (default: all)')
-                .setRequired(false)
-                .addChoices(
-                    { name: 'All',        value: 'all' },
-                    { name: 'ARC Units',  value: 'arc' },
-                    { name: 'Containers', value: 'containers' },
-                    { name: 'Locations',  value: 'locations' },
-                    { name: 'Nature',     value: 'nature' },
-                    { name: 'Quests',     value: 'quests' },
-                    { name: 'Events',     value: 'events' }
-                ))
-        .addStringOption(o =>
-            o.setName('layer')
-                .setDescription('Map layer (default: surface)')
-                .setRequired(false)
-                .addChoices(
-                    { name: 'Surface / Upper', value: 'surface' },
-                    { name: 'Underground / Lower', value: 'underground' }
-                )),
-
-    new SlashCommandBuilder()
-        .setName('mapstats')
-        .setDescription('Show marker statistics for a map without generating an image')
-        .addStringOption(o =>
-            o.setName('map')
-                .setDescription('Map to check')
-                .setRequired(true)
-                .addChoices(
-                    { name: 'Dam Battlegrounds', value: 'dam' },
-                    { name: 'Buried City',        value: 'sector_zero' },
-                    { name: 'Stella Montis',      value: 'stella_montis' },
-                    { name: 'Spaceport',          value: 'spaceport' },
-                    { name: 'Blue Gate',          value: 'blue_gate' },
-                    { name: 'Riven Tides',        value: 'riven_tides' }
-                )),
-
-    new SlashCommandBuilder()
-        .setName('status')
-        .setDescription('Check bot heartbeat and system health')
-].map(c => c.toJSON());
-
-async function registerCommands() {
-    const rest = new REST({ version: '10' }).setToken(TOKEN);
+// --- PERSISTENCE HELPERS ---
+async function ensureAuth() {
+    if (isAuthorized) return true;
     try {
-        console.log('🔄 Refreshing slash commands...');
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log('✅ Commands registered.');
-    } catch (err) {
-        console.error('❌ Command registration failed:', err);
+        await signInAnonymously(auth);
+        isAuthorized = true;
+        return true;
+    } catch (e) {
+        console.error("❌ Firebase Auth Failed:", e.message);
+        return false;
     }
 }
 
-async function fetchMarkers(mapId) {
-    // Primary endpoint: full marker dataset (ARC units, containers, locations, etc.)
-    const slug = MAP_CONFIG[mapId]?.apiSlug || mapId;
-    const url = `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${slug}`;
-    const res = await axios.get(url, { timeout: 15000 });
-    if (Array.isArray(res.data)) return res.data;
-    if (Array.isArray(res.data?.data)) return res.data.data;
-    const found = Object.values(res.data || {}).find(v => Array.isArray(v));
-    return found || [];
+function getBotConfigDoc(guildId) {
+    return doc(db, 'artifacts', appId, 'public', 'data', 'bot_configs', `${CLIENT_ID}_${guildId}`);
 }
 
-async function fetchBlueprints(mapId) {
-    // Secondary endpoint: community-submitted blueprint/recipe locations
-    const config = MAP_CONFIG[mapId];
-    const slug = config.apiSlug || mapId;
-    const url = `https://metaforge.app/api/game-map-data/found-items?mapID=${slug}&gameID=arc-raiders`;
-    const res = await axios.get(url, { timeout: 15000 });
-    if (Array.isArray(res.data?.allData)) return res.data.allData;
-    if (Array.isArray(res.data)) return res.data;
-    const found = Object.values(res.data || {}).find(v => Array.isArray(v));
-    return found || [];
+async function saveGuildConfig(guildId) {
+    if (!await ensureAuth()) return;
+    const config = guildConfigs.get(guildId);
+    if (!config) return;
+    try {
+        const docRef = getBotConfigDoc(guildId);
+        await setDoc(docRef, config);
+    } catch (e) { console.error(`Error saving config for guild ${guildId}:`, e.message); }
 }
 
-// ─── Event Handlers ──────────────────────────────────────────────────────────
-client.once(Events.ClientReady, c => {
-    console.log(`📡 Online as ${c.user.tag}`);
-    registerCommands();
-});
-
-client.on(Events.InteractionCreate, async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-
-    const { commandName, user } = interaction;
-    console.log(`📥 /${commandName} from ${user.tag}`);
-
-    // ── /status ───────────────────────────────────────────────────────────────
-    if (commandName === 'status') {
-        return interaction.reply({
-            content: `✅ **Online** | Ping: **${client.ws.ping}ms** | Commands: \`/mapview\`, \`/mapstats\``,
-            flags: [MessageFlags.Ephemeral]
+async function loadAllConfigs() {
+    if (!await ensureAuth()) return;
+    try {
+        const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'bot_configs');
+        const querySnapshot = await getDocs(colRef);
+        querySnapshot.forEach((doc) => {
+            if (doc.id.startsWith(CLIENT_ID)) {
+                const guildId = doc.id.replace(`${CLIENT_ID}_`, '');
+                const data = doc.data();
+                if (!data.alertedEventKeys) data.alertedEventKeys = [];
+                if (!data.activeAlerts) data.activeAlerts = [];
+                if (data.scheduledEventsEnabled === undefined) data.scheduledEventsEnabled = true;
+                if (data.rolePingsEnabled === undefined) data.rolePingsEnabled = true;
+                guildConfigs.set(guildId, data);
+            }
         });
+    } catch (e) { console.error("❌ Error loading configs:", e.message); }
+}
+
+// --- SUBSCRIPTION HELPERS ---
+function getUserSubCollection(userId) {
+    return collection(db, 'artifacts', appId, 'users', userId, 'subscriptions');
+}
+
+async function getUserSubscriptions(userId) {
+    if (!await ensureAuth()) return [];
+    try {
+        const snap = await getDocs(getUserSubCollection(userId));
+        return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch (e) { 
+        console.error(`[Firestore] Error fetching subs for ${userId}:`, e.message);
+        return []; 
+    }
+}
+
+async function isGuildBlacklisted(guildId) {
+    if (!await ensureAuth()) return false;
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'blacklist', guildId);
+    const snap = await getDoc(docRef);
+    return snap.exists();
+}
+
+async function blacklistGuild(guildId) {
+    if (!await ensureAuth()) return;
+    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'blacklist', guildId);
+    await setDoc(docRef, { blacklisted_at: Date.now() });
+}
+
+async function refreshCaches() {
+    try {
+        const [arcRes, itemRes, traderRes, questRes] = await Promise.all([
+            axios.get(ARCS_API_URL), axios.get(ITEMS_API_URL), axios.get(TRADERS_API_URL), axios.get(QUESTS_API_URL)
+        ]);
+        arcCache = arcRes.data?.data || [];
+        itemCache = itemRes.data?.data || [];
+        traderCache = traderRes.data?.data || {};
+        questCache = questRes.data?.data || [];
+        traderItemsFlat = [];
+        const cats = new Set();
+        for (const [traderName, items] of Object.entries(traderCache)) {
+            items.forEach(item => { 
+                traderItemsFlat.push({ ...item, traderName }); 
+                if (item.item_type) cats.add(item.item_type);
+            });
+        }
+        traderCategories = Array.from(cats);
+        console.log(`[Cache] Success: Loaded ${arcCache.length} ARC, ${itemCache.length} Items.`);
+    } catch (e) { console.error("❌ Error refreshing caches:", e.message); }
+}
+
+async function getOrCreateEventRole(guild, eventName) {
+    try {
+        const roles = await guild.roles.fetch();
+        let role = roles.find(r => r.name === eventName);
+        if (!role) {
+            role = await guild.roles.create({
+                name: eventName,
+                reason: 'Auto-created for ARC Raiders rotation alerts',
+                mentionable: true,
+                color: 0x5865F2
+            });
+        }
+        return role;
+    } catch (e) { return null; }
+}
+
+function getLocalImageAsDataURI(fileName) {
+    if (!fileName) return null;
+    const filePath = path.join(__dirname, 'assets', fileName);
+    if (!fs.existsSync(filePath)) return null;
+    try {
+        const buffer = fs.readFileSync(filePath);
+        return `data:image/png;base64,${buffer.toString('base64')}`;
+    } catch (err) { return null; }
+}
+
+// --- BOT LOGIC ---
+async function updateEvents(targetGuildId = null, forceNewMessages = false, purgeActivePings = false) {
+    if (!targetGuildId) {
+        if (isGlobalUpdating) return;
+        isGlobalUpdating = true;
     }
 
-    // ── /mapstats ─────────────────────────────────────────────────────────────
-    if (commandName === 'mapstats') {
-        await interaction.deferReply();
-        const mapId = interaction.options.getString('map');
-        const config = MAP_CONFIG[mapId];
+    try {
+        const response = await axios.get(API_URL);
+        const events = response.data?.data;
+        if (!events || !Array.isArray(events)) { if (!targetGuildId) isGlobalUpdating = false; return; }
 
+        const now = Date.now();
+        const alertWindow = now + (60 * 60 * 1000); 
+        const scheduleWindow = now + (3 * 60 * 60 * 1000); 
+
+        // GLOBAL DM ENGINE
+        if (!targetGuildId) {
+            try {
+                const activeUsersSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'subscription_users'));
+                for (const userDoc of activeUsersSnap.docs) {
+                    const userId = userDoc.id;
+                    const subs = await getUserSubscriptions(userId);
+                    const discordUser = await client.users.fetch(userId).catch(() => null);
+                    if (!discordUser || subs.length === 0) continue;
+                    for (const sub of subs) {
+                        const matchedEvent = events.find(ev =>
+                            ev.map?.toLowerCase().trim() === sub.map?.toLowerCase().trim() &&
+                            ev.name?.toLowerCase().trim() === sub.event?.toLowerCase().trim() &&
+                            ev.startTime > now
+                        );
+                        if (matchedEvent) {
+                            const timeUntil = matchedEvent.startTime - now;
+                            for (const offsetMs of sub.offsets) {
+                                const offsetNum = Number(offsetMs);
+                                if (timeUntil <= offsetNum && timeUntil > (offsetNum - 120000)) {
+                                    const alertKey = `dm_${userId}_${matchedEvent.map}_${matchedEvent.name}_${matchedEvent.startTime}_${offsetNum}`;
+                                    const lockDoc = doc(db, 'artifacts', appId, 'public', 'data', 'sent_alerts', alertKey);
+                                    const lockSnap = await getDoc(lockDoc);
+                                    if (!lockSnap.exists()) {
+                                        const embed = new EmbedBuilder()
+                                            .setTitle("🔔 Rotation Starting")
+                                            .setDescription(`${getEmoji(matchedEvent.name)} **${matchedEvent.name}** on **${matchedEvent.map}** starts <t:${Math.floor(matchedEvent.startTime/1000)}:R>!`)
+                                            .setColor(0x00AE86)
+                                            .setTimestamp();
+                                        try {
+                                            await discordUser.send({ embeds: [embed] });
+                                            await setDoc(lockDoc, { sent_at: now, expires_at: matchedEvent.startTime + (24 * 60 * 60 * 1000) });
+                                        } catch (dmErr) {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (engErr) {}
+        }
+
+        const guildsToUpdate = targetGuildId
+            ? [[targetGuildId, guildConfigs.get(targetGuildId)]]
+            : Array.from(guildConfigs.entries());
+
+        for (const [guildId, config] of guildsToUpdate) {
+            if (!config || !config.channelId || activeGuildUpdates.has(guildId)) continue;
+            activeGuildUpdates.add(guildId);
+            try {
+                let channel;
+                try { channel = await client.channels.fetch(config.channelId); } catch (err) { continue; }
+                if (!channel) continue;
+                const guild = channel.guild;
+
+                // 1. CLEANUP ROLE PINGS
+                if (config.activeAlerts && config.activeAlerts.length > 0) {
+                    const freshAlerts = [];
+                    for (const alert of config.activeAlerts) {
+                        if (now >= alert.startTime || purgeActivePings) {
+                            try { const msg = await channel.messages.fetch(alert.messageId); await msg.delete(); } catch (err) {}
+                            if (purgeActivePings) config.alertedEventKeys = config.alertedEventKeys.filter(k => !k.includes(String(alert.startTime)));
+                        } else freshAlerts.push(alert);
+                    }
+                    config.activeAlerts = freshAlerts;
+                }
+
+                // 2. DISCORD SCHEDULED EVENTS SYNC
+                if (config.scheduledEventsEnabled !== false) {
+                    let existingScheduledEvents = [];
+                    try { existingScheduledEvents = await guild.scheduledEvents.fetch(); } catch (e) {}
+                    const seenSlots = new Set();
+                    for (const se of existingScheduledEvents.values()) {
+                        const key = `${se.scheduledStartTimestamp}_${se.entityMetadata?.location}`;
+                        if (seenSlots.has(key)) { try { await se.delete(); } catch (e) {} } else { seenSlots.add(key); }
+                    }
+                    const scorableEvents = events.filter(e => e.startTime > now && e.startTime <= scheduleWindow);
+                    const groupedEvents = {};
+                    scorableEvents.forEach(e => {
+                        const groupKey = `${e.map}_${e.startTime}`;
+                        if (!groupedEvents[groupKey]) groupedEvents[groupKey] = [];
+                        groupedEvents[groupKey].push(e);
+                    });
+                    for (const groupKey in groupedEvents) {
+                        const group = groupedEvents[groupKey];
+                        const first = group[0];
+                        const existingEvent = existingScheduledEvents.find(se =>
+                            se.entityMetadata?.location === first.map &&
+                            Math.abs(se.scheduledStartTimestamp - first.startTime) < 120000
+                        );
+                        const finalName = `${group.map(ev => `${getEmoji(ev.name)} ${ev.name}`).join(' & ')} (${first.map})`.substring(0, 100);
+                        const finalDesc = `Upcoming rotation group on ${first.map}:\n${group.map(ev => `• ${getEmoji(ev.name)} **${ev.name}**`).join('\n')}`;
+                        const mapKey = Object.keys(mapConfigs).find(k =>
+                            k.toLowerCase().replace(/\s/g, '') === first.map?.toLowerCase().replace(/\s/g, '')
+                        );
+                        const dataURI = mapKey ? getLocalImageAsDataURI(mapConfigs[mapKey].fileName) : null;
+                        if (existingEvent) {
+                            try { await existingEvent.edit({ name: finalName, description: finalDesc, image: dataURI }); } catch (err) {}
+                        } else {
+                            try {
+                                await guild.scheduledEvents.create({
+                                    name: finalName,
+                                    scheduledStartTime: new Date(first.startTime),
+                                    scheduledEndTime: new Date(Math.max(...group.map(ev => ev.endTime))),
+                                    privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+                                    entityType: GuildScheduledEventEntityType.External,
+                                    entityMetadata: { location: first.map },
+                                    image: dataURI,
+                                    description: finalDesc
+                                });
+                            } catch (err) {}
+                        }
+                    }
+                }
+
+                // 3. MAP EMBEDS
+                if (forceNewMessages) {
+                    for (const key in config.messageIds) {
+                        if (config.messageIds[key]) {
+                            try { const m = await channel.messages.fetch(config.messageIds[key]); await m.delete(); } catch (e) {}
+                            config.messageIds[key] = null;
+                        }
+                    }
+                }
+                for (const [mapName, mapSet] of Object.entries(mapConfigs)) {
+                    const mapEvents = events.filter(e =>
+                        e.map?.toLowerCase().replace(/\s/g, '') === mapName.toLowerCase().replace(/\s/g, '')
+                    );
+                    const activeEvents = mapEvents.filter(e => e.startTime <= now && e.endTime > now);
+                    const upcoming = mapEvents.filter(e => e.startTime > now)
+                        .sort((a, b) => a.startTime - b.startTime)
+                        .slice(0, 3);
+                    const imagePath = path.join(__dirname, 'assets', mapSet.fileName);
+                    const file = fs.existsSync(imagePath) ? new AttachmentBuilder(imagePath) : null;
+                    const embed = new EmbedBuilder()
+                        .setTitle(`📍 ${mapName}`)
+                        .setColor(mapSet.color)
+                        .setTimestamp()
+                        .setFooter({ text: `metaforge.app/arc-raiders` });
+                    if (file) embed.setImage(`attachment://${mapSet.fileName}`);
+                    if (activeEvents.length > 0) {
+                        embed.addFields({
+                            name: '📡 Status',
+                            value: activeEvents.map(ev =>
+                                `🟢 **LIVE:** ${getEmoji(ev.name)} **${ev.name}** (Ends <t:${Math.floor(ev.endTime / 1000)}:R>)`
+                            ).join('\n')
+                        });
+                        if (activeEvents[0].icon) embed.setThumbnail(activeEvents[0].icon);
+                    } else {
+                        embed.addFields({ name: '📡 Status', value: '⚪ **Offline**' });
+                    }
+                    upcoming.forEach((e, i) => {
+                        embed.addFields({
+                            name: `Next Up #${i + 1}`,
+                            value: `${getEmoji(e.name)} **${e.name}**\n<t:${Math.floor(e.startTime / 1000)}:R>`,
+                            inline: true
+                        });
+                    });
+                    await syncMessageWithFile(channel, config, mapName, embed, file);
+                }
+
+                // 4. SUMMARY
+                const summary = new EmbedBuilder()
+                    .setTitle('🛸 ARC Raiders - Live Summary')
+                    .setColor(0x00AE86)
+                    .setDescription('React with an emoji below to get notification roles!')
+                    .setFooter({ text: `Data: metaforge.app/arc-raiders` })
+                    .setTimestamp();
+                const current = events.filter(e => e.startTime <= now && e.endTime > now);
+                if (current.length > 0) {
+                    summary.addFields({ name: '✅ Active', value: current.map(e => `${getEmoji(e.name)} **${e.name}** (${e.map})`).join('\n') });
+                } else {
+                    summary.addFields({ name: '✅ Active', value: 'None.' });
+                }
+                const summarySent = await syncMessage(channel, config, 'Summary', summary);
+                if (summarySent && forceNewMessages) {
+                    for (const emoji of Object.values(eventEmojis)) {
+                        try { await summarySent.react(emoji); } catch (e) {}
+                    }
+                }
+
+                // 5. ROLE PINGS (sent last, if enabled)
+                if (config.rolePingsEnabled !== false) {
+                    const scorableForPing = events.filter(e => e.startTime > now && e.startTime <= alertWindow);
+                    for (const e of scorableForPing) {
+                        const alertKey = `${e.name}_${e.map}_${e.startTime}`;
+                        if (!config.alertedEventKeys.includes(alertKey)) {
+                            const role = await getOrCreateEventRole(guild, e.name);
+                            const roleMention = role ? `<@&${role.id}>` : `**${e.name}**`;
+                            const alertSent = await channel.send({
+                                content: `⚠️ **Upcoming Event:** ${getEmoji(e.name)} ${roleMention} on **${e.map}** starts <t:${Math.floor(e.startTime / 1000)}:R>!`
+                            });
+                            config.activeAlerts.push({ messageId: alertSent.id, startTime: e.startTime });
+                            config.alertedEventKeys.push(alertKey);
+                        }
+                    }
+                }
+                await saveGuildConfig(guildId);
+            } finally { activeGuildUpdates.delete(guildId); }
+        }
+    } catch (error) { console.error('Loop error:', error.message); }
+    finally { if (!targetGuildId) isGlobalUpdating = false; }
+}
+
+async function syncMessage(channel, config, key, embed) {
+    if (!config.messageIds) config.messageIds = {};
+    if (config.messageIds[key]) {
         try {
-            const markers = await fetchMarkers(mapId);
-            const stats = buildStats(markers);
-            const locked = markers.filter(m => m.behindLockedDoor).length;
-            const underground = markers.filter(m => m.zlayers === 1).length;
+            const msg = await channel.messages.fetch(config.messageIds[key]);
+            return await msg.edit({ embeds: [embed] });
+        } catch (e) {
+            const sent = await channel.send({ embeds: [embed] });
+            config.messageIds[key] = sent.id;
+            return sent;
+        }
+    } else {
+        const sent = await channel.send({ embeds: [embed] });
+        config.messageIds[key] = sent.id;
+        return sent;
+    }
+}
 
-            const statsLines = Object.entries(stats)
-                .sort((a, b) => b[1] - a[1])
-                .map(([cat, n]) => `\`${cat.padEnd(12)}\` **${n}**`)
-                .join('\n');
+async function syncMessageWithFile(channel, config, key, embed, file) {
+    if (!config.messageIds) config.messageIds = {};
+    const files = file ? [file] : [];
+    if (config.messageIds[key]) {
+        try {
+            const msg = await channel.messages.fetch(config.messageIds[key]);
+            return await msg.edit({ embeds: [embed], files });
+        } catch (e) {
+            const sent = await channel.send({ embeds: [embed], files });
+            config.messageIds[key] = sent.id;
+            return sent;
+        }
+    } else {
+        const sent = await channel.send({ embeds: [embed], files });
+        config.messageIds[key] = sent.id;
+        return sent;
+    }
+}
 
+function buildTraderItemEmbed(item) {
+    return new EmbedBuilder()
+        .setTitle(`📦 Item: ${item.name}`)
+        .setDescription(item.description || "No info.")
+        .setColor(rarityColors[item.rarity] || 0x5865F2)
+        .setThumbnail(item.icon)
+        .addFields(
+            { name: 'Trader Price', value: `🪙 ${item.trader_price.toLocaleString()}`, inline: true },
+            { name: 'Category', value: item.item_type, inline: true }
+        )
+        .setTimestamp();
+}
+
+function generateSetupEmbed(guild, config) {
+    return new EmbedBuilder()
+        .setTitle(`⚙️ Tactical Setup: ${guild.name}`)
+        .setColor(0x5865F2)
+        .setThumbnail(guild.iconURL())
+        .setDescription("Configure how Raider Companion operates in this server.")
+        .addFields(
+            { name: "📍 Tactical Channel",  value: config.channelId ? `<#${config.channelId}>` : "❌ *Not Configured*", inline: true },
+            { name: "📅 Discord Events",    value: config.scheduledEventsEnabled !== false ? "✅ Enabled" : "❌ Disabled", inline: true },
+            { name: "🔔 Role Pings",        value: config.rolePingsEnabled !== false ? "✅ Enabled" : "❌ Disabled", inline: true }
+        )
+        .setFooter({ text: "Use the menu and buttons below to adjust settings." })
+        .setTimestamp();
+}
+
+function generateSetupComponents(config) {
+    const channelSelect = new ActionRowBuilder().addComponents(
+        new ChannelSelectMenuBuilder()
+            .setCustomId('setup_channel_select')
+            .setPlaceholder('Select tactical channel...')
+            .addChannelTypes(ChannelType.GuildText)
+    );
+    const toggleRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('setup_toggle_events')
+            .setLabel(config.scheduledEventsEnabled !== false ? 'Disable Events Tab' : 'Enable Events Tab')
+            .setStyle(config.scheduledEventsEnabled !== false ? ButtonStyle.Danger : ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId('setup_toggle_pings')
+            .setLabel(config.rolePingsEnabled !== false ? 'Disable Role Pings' : 'Enable Role Pings')
+            .setStyle(config.rolePingsEnabled !== false ? ButtonStyle.Danger : ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId('setup_create_roles')
+            .setLabel('Create Roles')
+            .setStyle(ButtonStyle.Secondary)
+            .setEmoji('🎭')
+    );
+    return [channelSelect, toggleRow];
+}
+
+const helpPages = [
+    { title: "🛸 Overview",  description: "Stay informed about ARC Raiders rotations and items.", fields: [{ name: "Intelligence", value: "`/arc`, `/item`, `/traders`, `/quests`" }] },
+    { title: "🔔 Alerts",    description: "Personal DM notifications.",                          fields: [{ name: "Command",      value: "`/subscribe`" }] },
+    { title: "🛠️ Admin",    description: "Configure the bot.",                                   fields: [{ name: "Setup",        value: "`/setup` and `/update`" }] }
+];
+
+function generateHelpEmbed(i) {
+    return new EmbedBuilder()
+        .setTitle(helpPages[i].title)
+        .setDescription(helpPages[i].description)
+        .setColor(0x5865F2)
+        .addFields(helpPages[i].fields)
+        .setFooter({ text: `Page ${i + 1}/3` });
+}
+
+function generateHelpComponents(i) {
+    return [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`help_prev_${i}`).setLabel('Prev').setStyle(ButtonStyle.Secondary).setDisabled(i === 0),
+        new ButtonBuilder().setCustomId(`help_next_${i}`).setLabel('Next').setStyle(ButtonStyle.Primary).setDisabled(i === 2)
+    )];
+}
+
+const commandsData = [
+    new SlashCommandBuilder().setName('setup').setDescription('Setup tactical channel').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
+    new SlashCommandBuilder().setName('update').setDescription('Refresh everything').setDefaultMemberPermissions(PermissionFlagsBits.Administrator).toJSON(),
+    new SlashCommandBuilder().setName('arc').setDescription('ARC Intel').addStringOption(o => o.setName('unit').setDescription('Unit').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('item').setDescription('Item Search').addStringOption(o => o.setName('name').setDescription('Item').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('traders').setDescription('Trader Inventories').addStringOption(o => o.setName('name').setDescription('Trader/Category').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('quests').setDescription('Quest Logs').addStringOption(o => o.setName('name').setDescription('Quest').setRequired(true).setAutocomplete(true)).toJSON(),
+    new SlashCommandBuilder().setName('subscribe').setDescription('Personal DM Alerts').toJSON(),
+    new SlashCommandBuilder().setName('test-dm').setDescription('Verify alerts (Owner Only)').toJSON(),
+    new SlashCommandBuilder().setName('help').setDescription('Help guide').toJSON(),
+    new SlashCommandBuilder().setName('servers').setDescription('Manage servers (Owner Only)').toJSON()
+];
+
+client.on('interactionCreate', async interaction => {
+    try {
+        if (interaction.isAutocomplete()) {
+            const f = interaction.options.getFocused().toLowerCase();
+            if (interaction.commandName === 'arc')
+                await interaction.respond(arcCache.filter(a => a.name.toLowerCase().includes(f)).slice(0, 25).map(a => ({ name: a.name, value: a.id })));
+            if (interaction.commandName === 'item')
+                await interaction.respond(itemCache.filter(i => i.name.toLowerCase().includes(f)).slice(0, 25).map(i => ({ name: i.name, value: i.id })));
+            if (interaction.commandName === 'traders') {
+                const results = [];
+                Object.keys(traderCache).forEach(n => { if (n.toLowerCase().includes(f)) results.push({ name: `👤 ${n}`, value: `trader:${n}` }); });
+                traderCategories.forEach(c => { if (c.toLowerCase().includes(f)) results.push({ name: `📁 ${c}`, value: `category:${c}` }); });
+                await interaction.respond(results.slice(0, 25));
+            }
+            if (interaction.commandName === 'quests')
+                await interaction.respond(questCache.filter(q => q.name.toLowerCase().includes(f)).slice(0, 25).map(q => ({ name: q.name, value: q.id })));
+            return;
+        }
+
+        if (interaction.isChannelSelectMenu() && interaction.customId === 'setup_channel_select') {
+            const ch = interaction.channels.first();
+            let cfg = guildConfigs.get(interaction.guildId) || { activeAlerts: [], alertedEventKeys: [], messageIds: {} };
+            cfg.channelId = ch.id;
+            guildConfigs.set(interaction.guildId, cfg);
+            await saveGuildConfig(interaction.guildId);
+            await interaction.update({ embeds: [generateSetupEmbed(interaction.guild, cfg)], components: generateSetupComponents(cfg) });
+            await updateEvents(interaction.guildId, true, true);
+            return;
+        }
+
+        if (interaction.isStringSelectMenu()) {
+            if (interaction.customId === 'trader_item_select') {
+                const i = traderItemsFlat.find(it => it.id === interaction.values[0]);
+                if (i) await interaction.reply({ embeds: [buildTraderItemEmbed(i)], flags: [MessageFlags.Ephemeral] });
+            }
+            if (interaction.customId === 'sub_delete_select') {
+                await interaction.deferUpdate();
+                await deleteDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', interaction.values[0]));
+                await interaction.editReply({ content: "✅ Deleted.", embeds: [], components: [] });
+            }
+            if (interaction.customId === 'sub_create_map') {
+                const opts = Object.keys(eventEmojis).map(e => ({ label: e, value: e, emoji: eventEmojis[e] }));
+                await interaction.update({
+                    content: `📍 Map: **${interaction.values[0]}**\nSelect rotation:`,
+                    components: [new ActionRowBuilder().addComponents(
+                        new StringSelectMenuBuilder()
+                            .setCustomId(`sub_create_event|${interaction.values[0]}`)
+                            .setPlaceholder('Select...')
+                            .addOptions(opts)
+                    )]
+                });
+            }
+            if (interaction.customId.startsWith('sub_create_event|')) {
+                const map = interaction.customId.split('|')[1];
+                await interaction.update({
+                    content: `📍 Map: **${map}**\n🛸 Rotation: **${interaction.values[0]}**\nSelect lead times:`,
+                    components: [new ActionRowBuilder().addComponents(
+                        new StringSelectMenuBuilder()
+                            .setCustomId(`sub_create_times|${map}|${interaction.values[0]}`)
+                            .setPlaceholder('Select...')
+                            .setMinValues(1)
+                            .setMaxValues(2)
+                            .addOptions(notificationTimes)
+                    )]
+                });
+            }
+            if (interaction.customId.startsWith('sub_create_times|')) {
+                const [, map, event] = interaction.customId.split('|');
+                const numericOffsets = interaction.values.map(Number);
+                const subId = `${map}_${event}`.toLowerCase().replace(/\s/g, '_');
+                await interaction.deferUpdate();
+                await setDoc(doc(db, 'artifacts', appId, 'users', interaction.user.id, 'subscriptions', subId), { map, event, offsets: numericOffsets, created_at: Date.now() });
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'subscription_users', interaction.user.id), { active: true });
+                await interaction.editReply({ content: `✅ **Active!** DMs set for **${event}** on **${map}**.`, components: [] });
+            }
+            if (interaction.customId === 'server_mgmt_select') {
+                if (interaction.user.id !== OWNER_ID) return;
+                const guild = await client.guilds.fetch(interaction.values[0]);
+                const owner = await guild.fetchOwner();
+                const BotJoined = guild.members.me?.joinedTimestamp;
+                const active = guild.members.cache.filter(m => m.presence && m.presence.status !== 'offline').size;
+                const embed = new EmbedBuilder()
+                    .setTitle(`🛡️ Server: ${guild.name}`)
+                    .setThumbnail(guild.iconURL())
+                    .setColor(0x5865F2)
+                    .addFields(
+                        { name: '👤 Owner',        value: `${owner?.user.tag || "Unknown"} (\`${owner?.id || "N/A"}\`)`, inline: true },
+                        { name: '🆔 Server ID',    value: `\`${guild.id}\``, inline: true },
+                        { name: '📅 Bot Joined',   value: BotJoined ? `<t:${Math.floor(BotJoined / 1000)}:f>` : "Unknown", inline: false },
+                        { name: '👥 Member Count', value: `Total: **${guild.memberCount}**\nActive: **${active}**`, inline: true }
+                    )
+                    .setTimestamp();
+                const row = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId(`srv_invite_${guild.id}`).setLabel('Invite').setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder().setCustomId(`srv_dm_${owner?.id || guild.id}`).setLabel('DM Owner').setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder().setCustomId(`srv_leave_${guild.id}`).setLabel('Leave Server').setStyle(ButtonStyle.Danger),
+                    new ButtonBuilder().setCustomId(`srv_block_${guild.id}`).setLabel('Block/Blacklist').setStyle(ButtonStyle.Danger)
+                );
+                await interaction.reply({ embeds: [embed], components: [row], flags: [MessageFlags.Ephemeral] });
+            }
+            return;
+        }
+
+        if (interaction.isButton()) {
+            if (interaction.customId === 'setup_toggle_events') {
+                let cfg = guildConfigs.get(interaction.guildId);
+                cfg.scheduledEventsEnabled = !cfg.scheduledEventsEnabled;
+                guildConfigs.set(interaction.guildId, cfg);
+                await saveGuildConfig(interaction.guildId);
+                await interaction.update({ embeds: [generateSetupEmbed(interaction.guild, cfg)], components: generateSetupComponents(cfg) });
+            }
+            if (interaction.customId === 'setup_toggle_pings') {
+                let cfg = guildConfigs.get(interaction.guildId);
+                cfg.rolePingsEnabled = !cfg.rolePingsEnabled;
+                guildConfigs.set(interaction.guildId, cfg);
+                await saveGuildConfig(interaction.guildId);
+                await interaction.update({ embeds: [generateSetupEmbed(interaction.guild, cfg)], components: generateSetupComponents(cfg) });
+            }
+            if (interaction.customId === 'setup_create_roles') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                for (const n of Object.keys(eventEmojis)) await getOrCreateEventRole(interaction.guild, n);
+                await interaction.editReply("✅ Roles verified.");
+            }
+            if (interaction.customId === 'sub_create_start') {
+                const opts = Object.keys(mapConfigs).map(m => ({ label: m, value: m }));
+                await interaction.reply({
+                    content: "📝 **New Alert**",
+                    components: [new ActionRowBuilder().addComponents(
+                        new StringSelectMenuBuilder().setCustomId('sub_create_map').setPlaceholder('Pick...').addOptions(opts)
+                    )],
+                    flags: [MessageFlags.Ephemeral]
+                });
+            }
+            if (interaction.customId.startsWith('help_')) {
+                const [, act, cur] = interaction.customId.split('_');
+                const nxt = act === 'next' ? Number(cur) + 1 : Number(cur) - 1;
+                await interaction.update({ embeds: [generateHelpEmbed(nxt)], components: generateHelpComponents(nxt) });
+            }
+            if (interaction.customId.startsWith('srv_')) {
+                if (interaction.user.id !== OWNER_ID) return;
+                const [, act, tid] = interaction.customId.split('_');
+                if (act === 'invite') {
+                    const g = await client.guilds.fetch(tid);
+                    const c = g.channels.cache.find(ch => ch.isTextBased() && ch.permissionsFor(client.user).has('CreateInstantInvite'));
+                    const inv = await c?.createInvite();
+                    await interaction.reply({ content: inv?.url || "Error", flags: [MessageFlags.Ephemeral] });
+                }
+                if (act === 'leave') {
+                    await (await client.guilds.fetch(tid)).leave();
+                    await interaction.reply({ content: "Left.", flags: [MessageFlags.Ephemeral] });
+                }
+                if (act === 'block') {
+                    await blacklistGuild(tid);
+                    await (await client.guilds.fetch(tid)).leave().catch(() => {});
+                    await interaction.reply({ content: "Blocked.", flags: [MessageFlags.Ephemeral] });
+                }
+                if (act === 'dm') {
+                    const modal = new ModalBuilder().setCustomId(`srv_modal_dm_${tid}`).setTitle('DM');
+                    modal.addComponents(new ActionRowBuilder().addComponents(
+                        new TextInputBuilder().setCustomId('dm_text').setLabel('Content').setStyle(TextInputStyle.Paragraph)
+                    ));
+                    await interaction.showModal(modal);
+                }
+            }
+            return;
+        }
+
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('srv_modal_dm_')) {
+            const u = await client.users.fetch(interaction.customId.replace('srv_modal_dm_', ''));
+            if (u) await u.send(`**Dev Message:** ${interaction.fields.getTextInputValue('dm_text')}`).catch(() => {});
+            await interaction.reply({ content: "✅ Sent.", flags: [MessageFlags.Ephemeral] });
+            return;
+        }
+
+        if (!interaction.isChatInputCommand()) return;
+
+        if (interaction.commandName === 'arc') {
+            const arc = arcCache.find(a => a.id === interaction.options.getString('unit'));
+            if (!arc) return interaction.reply({ content: "❌ ARC Intel not found.", flags: [MessageFlags.Ephemeral] });
             const embed = new EmbedBuilder()
-                .setTitle(`📊 ${config.name} — Marker Statistics`)
-                .setDescription(statsLines)
+                .setTitle(`🤖 Intel: ${arc.name}`)
+                .setDescription(arc.description)
+                .setColor(0x5865F2)
+                .setThumbnail(arc.icon)
+                .setImage(arc.image);
+            await interaction.reply({ embeds: [embed] });
+        }
+
+        if (interaction.commandName === 'item') {
+            const item = itemCache.find(i => i.id === interaction.options.getString('name'));
+            if (!item) return interaction.reply({ content: "❌ Item not found.", flags: [MessageFlags.Ephemeral] });
+            const embed = new EmbedBuilder()
+                .setTitle(`📦 Item: ${item.name}`)
+                .setDescription(item.description || "No data.")
+                .setColor(rarityColors[item.rarity] || 0x5865F2)
+                .setThumbnail(item.icon)
                 .addFields(
-                    { name: 'Total Markers', value: `**${markers.length}**`, inline: true },
-                    { name: 'Behind Locked Doors', value: `**${locked}**`, inline: true },
-                    { name: 'Underground Layer', value: `**${underground}**`, inline: true }
-                )
-                .setColor(0x2f3542)
-                .setTimestamp();
-
-            return interaction.editReply({ embeds: [embed] });
-        } catch (err) {
-            console.error(err);
-            return interaction.editReply(`❌ Failed to fetch data for **${config.name}**.`);
+                    { name: 'Rarity', value: item.rarity || 'Common', inline: true },
+                    { name: 'Value',  value: `🪙 ${item.value?.toLocaleString() || 0}`, inline: true }
+                );
+            if (item.workbench) embed.addFields({ name: 'Workbench', value: `🛠️ ${item.workbench}`, inline: true });
+            if (item.loot_area) embed.addFields({ name: 'Loot Area', value: `📍 ${item.loot_area}`, inline: true });
+            await interaction.reply({ embeds: [embed] });
         }
-    }
 
-    // ── /mapview ──────────────────────────────────────────────────────────────
-    if (commandName === 'mapview') {
-        await interaction.deferReply();
-
-        const mapId          = interaction.options.getString('map');
-        const categoryFilter = interaction.options.getString('category') || 'all';
-        const layerChoice    = interaction.options.getString('layer') || 'surface';
-        const layerKey       = layerChoice === 'underground' ? 1 : 2147483647;
-        const config         = MAP_CONFIG[mapId];
-        const layerConfig    = config.layers[layerKey] || Object.values(config.layers)[0];
-
-        try {
-            const markers = await fetchMarkers(mapId);
-
-            if (!markers.length) {
-                return interaction.editReply(`⚠️ No marker data returned for **${config.name}**.`);
+        if (interaction.commandName === 'traders') {
+            const q = interaction.options.getString('name');
+            if (q.startsWith('category:')) {
+                const cat = q.split(':')[1];
+                const items = traderItemsFlat.filter(i => i.item_type === cat);
+                if (items.length === 0) return interaction.reply({ content: "❌ No items found.", flags: [MessageFlags.Ephemeral] });
+                const embed = new EmbedBuilder().setTitle(`📁 Category: ${cat}`).setDescription(items.map(i => `• ${i.name} (${i.traderName})`).join('\n')).setColor(0x3498db);
+                const sel = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
+                await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sel)] });
+            } else if (q.startsWith('trader:')) {
+                const name = q.split(':')[1];
+                const items = traderCache[name];
+                if (!items) return interaction.reply({ content: "❌ Trader not found.", flags: [MessageFlags.Ephemeral] });
+                const embed = new EmbedBuilder().setTitle(`👤 Trader: ${name}`).setDescription(items.map(i => `• ${i.name} - 🪙 ${i.trader_price.toLocaleString()}`).join('\n')).setColor(0x00AE86);
+                const sel = new StringSelectMenuBuilder().setCustomId('trader_item_select').setPlaceholder('Select...').addOptions(items.slice(0, 25).map(i => ({ label: i.name, value: i.id })));
+                await interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sel)] });
             }
+        }
 
-            console.log(`🎨 Rendering ${markers.length} raw markers → filter: ${categoryFilter}, layer: ${layerChoice}`);
-            const imageBuffer = await generateMapImage(mapId, markers, categoryFilter, layerKey);
+        if (interaction.commandName === 'quests') {
+            const questId = interaction.options.getString('name');
+            await interaction.deferReply();
+            try {
+                const res = await axios.get(`${QUESTS_API_URL}?id=${questId}&page=1`);
+                const q = res.data?.data;
+                if (!q) return interaction.editReply("❌ Quest not found.");
+                const embed = new EmbedBuilder()
+                    .setTitle(`📜 Quest: ${q.name}`)
+                    .setColor(0x3498db)
+                    .setThumbnail(q.image);
+                if (q.trader_name) embed.addFields({ name: 'Giver', value: q.trader_name, inline: true });
+                if (q.xp > 0)     embed.addFields({ name: 'XP',    value: q.xp.toLocaleString(), inline: true });
+                if (q.objectives?.length > 0) embed.addFields({ name: 'Objectives', value: q.objectives.map(o => `• ${o}`).join('\n') });
+                await interaction.editReply({ embeds: [embed] });
+            } catch (e) { await interaction.editReply("❌ API Error."); }
+        }
 
-            // Always attach the rendered overlay
-            const files = [new AttachmentBuilder(imageBuffer, { name: 'overlay.jpg' })];
-
-            // Attach thumbnail from /assets/ if it exists
-            const thumbnailFile = config.thumbnail
-                ? path.join(__dirname, 'assets', config.thumbnail)
-                : null;
-            const hasThumbnail = thumbnailFile && fs.existsSync(thumbnailFile);
-            if (hasThumbnail) {
-                files.push(new AttachmentBuilder(thumbnailFile, { name: config.thumbnail }));
-            }
-
-            // Attach banner from /assets/ if it exists
-            const bannerPath = path.join(__dirname, 'assets', 'banner.jpg');
-            const hasBanner = fs.existsSync(bannerPath);
-            if (hasBanner) {
-                files.push(new AttachmentBuilder(bannerPath, { name: 'banner.jpg' }));
-            }
-
-            // Count what's actually shown after filters
-            const shown = markers.filter(m => {
-                const catOk   = categoryFilter === 'all' || m.category === categoryFilter;
-                const layerOk = layerKey === 1 ? m.zlayers === 1 : m.zlayers !== 1;
-                return catOk && layerOk;
-            }).length;
-
-            const stats = buildStats(markers);
-            const topCategories = Object.entries(stats)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 6)
-                .map(([k, v]) => ({ name: k, value: `${v}`, inline: true }));
-
+        if (interaction.commandName === 'subscribe') {
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+            const subs = await getUserSubscriptions(interaction.user.id);
             const embed = new EmbedBuilder()
-                .setTitle(`🗺️ ${config.name} — ${layerConfig.label}`)
-                .setDescription(
-                    `Showing **${shown}** of **${markers.length}** total markers` +
-                    (categoryFilter !== 'all' ? ` (filtered: \`${categoryFilter}\`)` : '') +
-                    '\n\n**Marker Types:**\n🔴 Circle = ARC units  🔷 Diamond = High-value  🟦 Square = Containers  🔺 Triangle = Locations'
-                )
-                .addFields(...topCategories)
-                .setColor(0x2f3542)
-                .setImage('attachment://overlay.jpg')
-                .setTimestamp()
-                .setFooter({ text: `metaforge.app data · ${config.name}` });
-
-            // Wire up /assets/ images to embed if they exist
-            if (hasThumbnail) embed.setThumbnail(`attachment://${config.thumbnail}`);
-            if (hasBanner)    embed.setAuthor({ name: 'ARC Raiders Map Intelligence', iconURL: 'attachment://banner.jpg' });
-
-            return interaction.editReply({ embeds: [embed], files });
-
-        } catch (err) {
-            console.error('❌ Map generation error:', err);
-
-            let msg = '❌ An error occurred generating the map overlay.';
-            if (err.message?.startsWith('MISSING_IMAGE')) {
-                const file = err.message.split(':')[1];
-                msg = `❌ Map file \`${file}\` not found in \`/maps/\`. Check the filename matches exactly.`;
-            } else if (err.code === 'ECONNABORTED') {
-                msg = '❌ API request timed out. Try again in a moment.';
+                .setTitle('🔔 DM Subscriptions')
+                .setColor(0x5865F2)
+                .setDescription('Manage personal rotation alerts.');
+            if (subs.length > 0) {
+                const list = subs.map(s =>
+                    `• ${getEmoji(s.event)} ${s.event} on ${s.map}\n└ Alerts: ${s.offsets.map(o => notificationTimes.find(t => t.value === String(o))?.label).join(', ')}`
+                ).join('\n\n');
+                embed.addFields({ name: 'Active Alerts', value: list });
+                const sel = new StringSelectMenuBuilder()
+                    .setCustomId('sub_delete_select')
+                    .setPlaceholder('Delete alert...')
+                    .addOptions(subs.map(s => ({ label: `${s.event || 'Unknown'} on ${s.map || 'Unknown'}`, value: s.id })));
+                await interaction.editReply({
+                    embeds: [embed],
+                    components: [
+                        new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success)),
+                        new ActionRowBuilder().addComponents(sel)
+                    ]
+                });
+            } else {
+                embed.addFields({ name: 'Status', value: 'No active personal subscriptions found.' });
+                await interaction.editReply({
+                    embeds: [embed],
+                    components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('sub_create_start').setLabel('Add Alert').setStyle(ButtonStyle.Success))]
+                });
             }
-
-            return interaction.editReply(msg);
         }
-    }
+
+        if (interaction.commandName === 'servers') {
+            if (interaction.user.id !== OWNER_ID) return;
+            const guilds = client.guilds.cache.map(g => ({ label: g.name.substring(0, 25), value: g.id }));
+            await interaction.reply({
+                content: "👤 **Management**",
+                components: [new ActionRowBuilder().addComponents(
+                    new StringSelectMenuBuilder().setCustomId('server_mgmt_select').setPlaceholder('Pick...').addOptions(guilds.slice(0, 25))
+                )],
+                flags: [MessageFlags.Ephemeral]
+            });
+        }
+
+        if (interaction.commandName === 'setup') {
+            const cfg = guildConfigs.get(interaction.guildId) || { channelId: null, messageIds: {} };
+            await interaction.reply({ embeds: [generateSetupEmbed(interaction.guild, cfg)], components: generateSetupComponents(cfg), flags: [MessageFlags.Ephemeral] });
+        }
+
+        if (interaction.commandName === 'help')
+            await interaction.reply({ embeds: [generateHelpEmbed(0)], components: generateHelpComponents(0), flags: [MessageFlags.Ephemeral] });
+
+        if (interaction.commandName === 'update') {
+            await interaction.reply({ content: '🔄 Refreshing...', flags: [MessageFlags.Ephemeral] });
+            await updateEvents(interaction.guildId, true, true);
+        }
+
+        if (interaction.commandName === 'test-dm') {
+            if (interaction.user.id !== OWNER_ID) return;
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+            const subs = await getUserSubscriptions(interaction.user.id);
+            const res = await axios.get(API_URL);
+            const evs = res.data?.data || [];
+            const embed = new EmbedBuilder().setTitle("🧪 Diagnostic").setColor(0x3498db);
+            let desc = "";
+            for (const s of subs) {
+                const m = evs.find(e =>
+                    e.map?.toLowerCase().trim() === s.map?.toLowerCase().trim() &&
+                    e.name?.toLowerCase().trim() === s.event?.toLowerCase().trim() &&
+                    e.startTime > Date.now()
+                );
+                desc += `📡 ${s.event} on ${s.map}: ${m ? "Upcoming found" : "None found"}\n`;
+            }
+            embed.setDescription(desc || "No subs.");
+            await interaction.user.send({ embeds: [embed] });
+            await interaction.editReply("✅ DM Sent.");
+        }
+
+    } catch (err) { console.error('❌ Interaction Error:', err.message); }
 });
 
-client.login(TOKEN);
+client.on('messageCreate', async m => {
+    if (m.author.bot || m.guild) return;
+    if (m.author.id === OWNER_ID && m.content.toLowerCase() === 'ping') return m.reply('Pong!');
+    const dev = await client.users.fetch(OWNER_ID);
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`srv_dm_${m.author.id}`).setLabel(`Reply`).setStyle(ButtonStyle.Primary)
+    );
+    await dev.send({ embeds: [new EmbedBuilder().setTitle('DM').setAuthor({ name: m.author.tag }).setDescription(m.content)], components: [row] });
+    await m.reply("✅ Forwarded.");
+});
+
+client.once(Events.ClientReady, async () => {
+    console.log(`[Startup] Logged in as ${client.user.tag}`);
+    client.user.setActivity('metaforge.app/arc-raiders', { type: ActivityType.Listening });
+    (async () => {
+        await ensureAuth();
+        await loadAllConfigs();
+        await refreshCaches();
+        const rest = new REST({ version: '10' }).setToken(TOKEN);
+        try {
+            for (const [gid] of client.guilds.cache) {
+                try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commandsData }); } catch (e) {}
+            }
+            await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandsData });
+        } catch (e) {}
+        await updateEvents(null, true, true);
+        setInterval(updateEvents, CHECK_INTERVAL);
+    })();
+});
+
+process.on('unhandledRejection', e => console.error('⚠️ Unhandled rejection:', e.message));
+client.login(TOKEN).catch(console.error);
