@@ -367,7 +367,8 @@ async function generateMapImage(mapId, markers, categoryFilter, layerKey) {
     const usedStyleMap = new Map();
 
     filtered.forEach(marker => {
-        const { lat, lng, category, subcategory, behindLockedDoor } = marker;
+        const { lat, lng, category, behindLockedDoor } = marker;
+        const subcategory = marker.subcategory || marker.item_id || 'unknown';
         const x = (lng - minLng) * scaleX;
         const y = (lat - minLat) * scaleY;
         const style = getMarkerStyle(category, subcategory);
@@ -494,6 +495,7 @@ async function fetchMarkers(mapId) {
     const url = `https://metaforge.app/api/game-map-data/found-items?mapID=${slug}&gameID=arc-raiders`;
     const res = await axios.get(url, { timeout: 15000 });
     if (Array.isArray(res.data)) return res.data;
+    if (Array.isArray(res.data?.allData)) return res.data.allData;
     if (Array.isArray(res.data?.data)) return res.data.data;
     const found = Object.values(res.data || {}).find(v => Array.isArray(v));
     return found || [];
