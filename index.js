@@ -23,6 +23,21 @@ const OWNER_ID = process.env.OWNER_ID || '0';
 // mapFile    → full map image from /maps/ (drawn on canvas)
 // thumbnail  → small preview image from /assets/ (used in Discord embed thumbnail)
 // zlayers: 2147483647 = surface, 1 = underground/lower level
+//
+// bounds: world coordinate of pixel (0,0) top-left corner of the map image.
+//   minLng = world lng at left edge of image
+//   minLat = world lat at top edge of image
+//   scaleX = pixels per lng unit  (calibrated from known pixel<->coord pairs)
+//   scaleY = pixels per lat unit
+//
+// To calibrate a new map: pick 2 landmarks, note their pixel pos on the image
+// and their lat/lng from the API, then solve:
+//   scaleX = (px2.x - px1.x) / (lng2 - lng1)
+//   scaleY = (px2.y - px1.y) / (lat2 - lat1)
+//   minLng = lng1 - px1.x / scaleX
+//   minLat = lat1 - px1.y / scaleY
+//
+// Maps not yet calibrated use calibrated:false and fall back to data-range fit.
 const MAP_CONFIG = {
     dam: {
         name: 'Dam Battlegrounds',
@@ -31,7 +46,10 @@ const MAP_CONFIG = {
             2147483647: { file: 'Dam_Battlegrounds_Map.jpg', label: 'Surface' },
             1:          { file: 'Dam_Battlegrounds_Map.jpg', label: 'Underground' }
         },
-        bounds: { minLat: 0, maxLat: 6000, minLng: 0, maxLng: 6000 }
+        // Calibrated: Pale Apartments px(1190,646)≈(lat:1900,lng:2800)
+        //             Electrical Tower px(3161,2201)≈(lat:3675,lng:5320)
+        calibrated: true,
+        bounds: { minLat: 1162.6, minLng: 1278.5, scaleX: 0.7821, scaleY: 0.8761 }
     },
     sector_zero: {
         name: 'Buried City',
@@ -39,7 +57,8 @@ const MAP_CONFIG = {
         layers: {
             2147483647: { file: 'Buried_City_Map.jpg', label: 'Surface' }
         },
-        bounds: { minLat: 0, maxLat: 5000, minLng: 0, maxLng: 5000 }
+        calibrated: false,
+        bounds: { minLat: 0, minLng: 0, scaleX: null, scaleY: null }
     },
     stella_montis: {
         name: 'Stella Montis',
@@ -48,7 +67,8 @@ const MAP_CONFIG = {
             2147483647: { file: 'Stella_Montis_Upper_Level_Map.jpg', label: 'Upper Level' },
             1:          { file: 'Stella_Montis_Lower_Level_Map.jpg', label: 'Lower Level' }
         },
-        bounds: { minLat: 0, maxLat: 8000, minLng: 0, maxLng: 8000 }
+        calibrated: false,
+        bounds: { minLat: 0, minLng: 0, scaleX: null, scaleY: null }
     },
     spaceport: {
         name: 'Spaceport',
@@ -57,7 +77,8 @@ const MAP_CONFIG = {
             2147483647: { file: 'Spaceport_Map.jpg', label: 'Surface' },
             1:          { file: 'Spaceport_Underground_Map.jpg', label: 'Underground' }
         },
-        bounds: { minLat: 0, maxLat: 4000, minLng: 0, maxLng: 4000 }
+        calibrated: false,
+        bounds: { minLat: 0, minLng: 0, scaleX: null, scaleY: null }
     },
     blue_gate: {
         name: 'Blue Gate',
@@ -66,15 +87,17 @@ const MAP_CONFIG = {
             2147483647: { file: 'Blue_Gate_Map.jpg', label: 'Surface' },
             1:          { file: 'Blue_Gate_Underground_Map.jpg', label: 'Underground' }
         },
-        bounds: { minLat: 0, maxLat: 5000, minLng: 0, maxLng: 5000 }
+        calibrated: false,
+        bounds: { minLat: 0, minLng: 0, scaleX: null, scaleY: null }
     },
     riven_tides: {
         name: 'Riven Tides',
-        thumbnail: null, // no thumbnail in /assets yet
+        thumbnail: null,
         layers: {
             2147483647: { file: 'Riven_Tides_Map.jpg', label: 'Surface' }
         },
-        bounds: { minLat: 0, maxLat: 6000, minLng: 0, maxLng: 6000 }
+        calibrated: false,
+        bounds: { minLat: 0, minLng: 0, scaleX: null, scaleY: null }
     }
 };
 
@@ -303,9 +326,28 @@ async function generateMapImage(mapId, markers, categoryFilter, layerKey) {
     const ctx = canvas.getContext('2d');
     ctx.drawImage(baseImage, 0, 0);
 
-    const { minLat, maxLat, minLng, maxLng } = config.bounds;
-    const scaleX = baseImage.width  / (maxLng - minLng);
-    const scaleY = baseImage.height / (maxLat - minLat);
+    // Resolve coordinate transform
+    let scaleX, scaleY, minLng, minLat;
+    if (config.calibrated) {
+        // Use calibrated pixel-per-unit scales and image-edge world coords
+        ({ scaleX, scaleY, minLng, minLat } = config.bounds);
+    } else {
+        // Fallback: fit data range to image — rough but avoids blank renders
+        const lats = markers.map(m => m.lat).filter(Boolean);
+        const lngs = markers.map(m => m.lng).filter(Boolean);
+        minLat = Math.min(...lats);
+        minLng = Math.min(...lngs);
+        const maxLat = Math.max(...lats);
+        const maxLng = Math.max(...lngs);
+        const padding = 0.05; // 5% padding
+        const latSpan = (maxLat - minLat) * (1 + padding * 2);
+        const lngSpan = (maxLng - minLng) * (1 + padding * 2);
+        minLat -= (maxLat - minLat) * padding;
+        minLng -= (maxLng - minLng) * padding;
+        scaleX = baseImage.width  / lngSpan;
+        scaleY = baseImage.height / latSpan;
+        console.log(`⚠️  ${config.name} not calibrated — using data-range fit`);
+    }
 
     // Filter markers by category and zlayer
     const filtered = markers.filter(m => {
