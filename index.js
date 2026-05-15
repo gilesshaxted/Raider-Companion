@@ -363,7 +363,7 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const commands = [
     new SlashCommandBuilder()
-        .setName('mapdata')
+        .setName('mapview')
         .setDescription('Generate a visual overlay of tactical map markers')
         .addStringOption(o =>
             o.setName('map')
@@ -455,7 +455,7 @@ client.on(Events.InteractionCreate, async interaction => {
     // ── /status ───────────────────────────────────────────────────────────────
     if (commandName === 'status') {
         return interaction.reply({
-            content: `✅ **Online** | Ping: **${client.ws.ping}ms** | Commands: \`/mapdata\`, \`/mapstats\``,
+            content: `✅ **Online** | Ping: **${client.ws.ping}ms** | Commands: \`/mapview\`, \`/mapstats\``,
             flags: [MessageFlags.Ephemeral]
         });
     }
@@ -495,8 +495,8 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     }
 
-    // ── /mapdata ──────────────────────────────────────────────────────────────
-    if (commandName === 'mapdata') {
+    // ── /mapview ──────────────────────────────────────────────────────────────
+    if (commandName === 'mapview') {
         await interaction.deferReply();
 
         const mapId          = interaction.options.getString('map');
