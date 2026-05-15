@@ -41,6 +41,7 @@ const OWNER_ID = process.env.OWNER_ID || '0';
 const MAP_CONFIG = {
     dam: {
         name: 'Dam Battlegrounds',
+        apiSlug: 'dam',
         thumbnail: 'dam_battlegrounds.png',
         layers: {
             2147483647: { file: 'Dam_Battlegrounds_Map.jpg', label: 'Surface' },
@@ -53,6 +54,7 @@ const MAP_CONFIG = {
     },
     sector_zero: {
         name: 'Buried City',
+        apiSlug: 'buried-city',
         thumbnail: 'buried_city.png',
         layers: {
             2147483647: { file: 'Buried_City_Map.jpg', label: 'Surface' }
@@ -62,6 +64,7 @@ const MAP_CONFIG = {
     },
     stella_montis: {
         name: 'Stella Montis',
+        apiSlug: 'stella-montis',
         thumbnail: 'stella_montis.png',
         layers: {
             2147483647: { file: 'Stella_Montis_Upper_Level_Map.jpg', label: 'Upper Level' },
@@ -72,6 +75,7 @@ const MAP_CONFIG = {
     },
     spaceport: {
         name: 'Spaceport',
+        apiSlug: 'spaceport',
         thumbnail: 'spaceport.png',
         layers: {
             2147483647: { file: 'Spaceport_Map.jpg', label: 'Surface' },
@@ -82,6 +86,7 @@ const MAP_CONFIG = {
     },
     blue_gate: {
         name: 'Blue Gate',
+        apiSlug: 'blue-gate',
         thumbnail: 'blue_gate.png',
         layers: {
             2147483647: { file: 'Blue_Gate_Map.jpg', label: 'Surface' },
@@ -92,6 +97,7 @@ const MAP_CONFIG = {
     },
     riven_tides: {
         name: 'Riven Tides',
+        apiSlug: 'riven-tides',
         thumbnail: null,
         layers: {
             2147483647: { file: 'Riven_Tides_Map.jpg', label: 'Surface' }
@@ -483,7 +489,9 @@ async function registerCommands() {
 }
 
 async function fetchMarkers(mapId) {
-    const url = `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapId}`;
+    const config = MAP_CONFIG[mapId];
+    const slug = config.apiSlug || mapId;
+    const url = `https://metaforge.app/api/game-map-data/found-items?mapID=${slug}&gameID=arc-raiders`;
     const res = await axios.get(url, { timeout: 15000 });
     if (Array.isArray(res.data)) return res.data;
     if (Array.isArray(res.data?.data)) return res.data.data;
