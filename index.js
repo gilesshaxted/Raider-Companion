@@ -490,13 +490,23 @@ async function registerCommands() {
 }
 
 async function fetchMarkers(mapId) {
+    // Primary endpoint: full marker dataset (ARC units, containers, locations, etc.)
+    const url = `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapId}`;
+    const res = await axios.get(url, { timeout: 15000 });
+    if (Array.isArray(res.data)) return res.data;
+    if (Array.isArray(res.data?.data)) return res.data.data;
+    const found = Object.values(res.data || {}).find(v => Array.isArray(v));
+    return found || [];
+}
+
+async function fetchBlueprints(mapId) {
+    // Secondary endpoint: community-submitted blueprint/recipe locations
     const config = MAP_CONFIG[mapId];
     const slug = config.apiSlug || mapId;
     const url = `https://metaforge.app/api/game-map-data/found-items?mapID=${slug}&gameID=arc-raiders`;
     const res = await axios.get(url, { timeout: 15000 });
-    if (Array.isArray(res.data)) return res.data;
     if (Array.isArray(res.data?.allData)) return res.data.allData;
-    if (Array.isArray(res.data?.data)) return res.data.data;
+    if (Array.isArray(res.data)) return res.data;
     const found = Object.values(res.data || {}).find(v => Array.isArray(v));
     return found || [];
 }
