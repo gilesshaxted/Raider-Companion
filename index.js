@@ -345,7 +345,16 @@ async function generateMapImage(mapId, markers, categoryFilter, layerKey) {
     ctx.font = 'bold 14px Arial';
     ctx.fillText(`${config.name} — ${layerConfig.label} — ${filtered.length} markers`, 10, 19);
 
-    return canvas.toBuffer('image/png');
+    // Output as JPEG — Discord's limit is 8MB. Always scale to MAX_SIDE.
+    const MAX_SIDE = 1500;
+    const scale = Math.min(MAX_SIDE / baseImage.width, MAX_SIDE / baseImage.height, 1);
+    const w2 = Math.round(baseImage.width * scale);
+    const h2 = Math.round(baseImage.height * scale);
+    const scaled = createCanvas(w2, h2);
+    scaled.getContext('2d').drawImage(canvas, 0, 0, w2, h2);
+    const buf = scaled.toBuffer('image/jpeg', { quality: 0.75 });
+    console.log(`🖼️ Output: ${w2}x${h2}px, ${(buf.length / 1024 / 1024).toFixed(2)}MB`);
+    return buf;
 }
 
 // ─── Statistics Helper ───────────────────────────────────────────────────────
@@ -517,7 +526,7 @@ client.on(Events.InteractionCreate, async interaction => {
             const imageBuffer = await generateMapImage(mapId, markers, categoryFilter, layerKey);
 
             // Always attach the rendered overlay
-            const files = [new AttachmentBuilder(imageBuffer, { name: 'overlay.png' })];
+            const files = [new AttachmentBuilder(imageBuffer, { name: 'overlay.jpg' })];
 
             // Attach thumbnail from /assets/ if it exists
             const thumbnailFile = config.thumbnail
@@ -557,7 +566,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 )
                 .addFields(...topCategories)
                 .setColor(0x2f3542)
-                .setImage('attachment://overlay.png')
+                .setImage('attachment://overlay.jpg')
                 .setTimestamp()
                 .setFooter({ text: `metaforge.app data · ${config.name}` });
 
