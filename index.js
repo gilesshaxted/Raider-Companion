@@ -46,10 +46,10 @@ const MAP_CONFIG = {
             2147483647: { file: 'Dam_Battlegrounds_Map.jpg', label: 'Surface' },
             1:          { file: 'Dam_Battlegrounds_Map.jpg', label: 'Underground' }
         },
-        // Calibrated: Pale Apartments px(1190,646)≈(lat:1900,lng:2800)
-        //             Electrical Tower px(3161,2201)≈(lat:3675,lng:5320)
+        // Calibrated: South Swamp Outpost px(1046,1642)→(lat:2838.94,lng:2682.81)
+        //             Spillway Hatch       px(2919,1710)→(lat:2924,lng:4916)
         calibrated: true,
-        bounds: { minLat: 1162.6, minLng: 1278.5, scaleX: 0.7821, scaleY: 0.8761 }
+        bounds: { minLat: 784.9912, minLng: 1435.6574, scaleX: 0.838711, scaleY: 0.799436 }
     },
     sector_zero: {
         name: 'Buried City',
