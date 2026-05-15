@@ -1,10 +1,10 @@
-const { 
-    Client, 
-    GatewayIntentBits, 
-    EmbedBuilder, 
-    AttachmentBuilder, 
-    REST, 
-    Routes, 
+const {
+    Client,
+    GatewayIntentBits,
+    EmbedBuilder,
+    AttachmentBuilder,
+    REST,
+    Routes,
     SlashCommandBuilder,
     MessageFlags,
     Events
@@ -19,223 +19,567 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OWNER_ID = process.env.OWNER_ID || '0';
 
-// World coordinate boundaries to map pixel space
+// ─── Map Configuration ──────────────────────────────────────────────────────
+// mapFile    → full map image from /maps/ (drawn on canvas)
+// thumbnail  → small preview image from /assets/ (used in Discord embed thumbnail)
+// zlayers: 2147483647 = surface, 1 = underground/lower level
 const MAP_CONFIG = {
-    'dam': {
-        file: 'dam_battlegrounds.png',
+    dam: {
         name: 'Dam Battlegrounds',
+        thumbnail: 'dam_battlegrounds.png',
+        layers: {
+            2147483647: { file: 'Dam_Battlegrounds_Map.jpg', label: 'Surface' },
+            1:          { file: 'Dam_Battlegrounds_Map.jpg', label: 'Underground' }
+        },
         bounds: { minLat: 0, maxLat: 6000, minLng: 0, maxLng: 6000 }
     },
-    'sector_zero': {
-        file: 'buried_city.png',
+    sector_zero: {
         name: 'Buried City',
+        thumbnail: 'buried_city.png',
+        layers: {
+            2147483647: { file: 'Buried_City_Map.jpg', label: 'Surface' }
+        },
         bounds: { minLat: 0, maxLat: 5000, minLng: 0, maxLng: 5000 }
     },
-    'stella_montis': {
-        file: 'stella_montis.png',
+    stella_montis: {
         name: 'Stella Montis',
+        thumbnail: 'stella_montis.png',
+        layers: {
+            2147483647: { file: 'Stella_Montis_Upper_Level_Map.jpg', label: 'Upper Level' },
+            1:          { file: 'Stella_Montis_Lower_Level_Map.jpg', label: 'Lower Level' }
+        },
         bounds: { minLat: 0, maxLat: 8000, minLng: 0, maxLng: 8000 }
     },
-    'spaceport': {
-        file: 'spaceport.png',
+    spaceport: {
         name: 'Spaceport',
+        thumbnail: 'spaceport.png',
+        layers: {
+            2147483647: { file: 'Spaceport_Map.jpg', label: 'Surface' },
+            1:          { file: 'Spaceport_Underground_Map.jpg', label: 'Underground' }
+        },
         bounds: { minLat: 0, maxLat: 4000, minLng: 0, maxLng: 4000 }
     },
-    'blue_gate': {
-        file: 'blue_gate.png',
+    blue_gate: {
         name: 'Blue Gate',
+        thumbnail: 'blue_gate.png',
+        layers: {
+            2147483647: { file: 'Blue_Gate_Map.jpg', label: 'Surface' },
+            1:          { file: 'Blue_Gate_Underground_Map.jpg', label: 'Underground' }
+        },
         bounds: { minLat: 0, maxLat: 5000, minLng: 0, maxLng: 5000 }
     },
-    'riven_tides': {
-        file: 'riven_tides.png',
+    riven_tides: {
         name: 'Riven Tides',
+        thumbnail: null, // no thumbnail in /assets yet
+        layers: {
+            2147483647: { file: 'Riven_Tides_Map.jpg', label: 'Surface' }
+        },
         bounds: { minLat: 0, maxLat: 6000, minLng: 0, maxLng: 6000 }
     }
 };
 
-const client = new Client({
-    intents: [GatewayIntentBits.Guilds]
-});
+// ─── Marker Visual Definitions ───────────────────────────────────────────────
+// Each entry defines: color, size, shape ('circle'|'square'|'diamond'|'triangle'), label
+const MARKER_STYLES = {
+    // ARC enemies
+    'arc:tick':         { color: '#ff4757', size: 5,  shape: 'circle',   label: 'Tick' },
+    'arc:pop':          { color: '#ff6b81', size: 5,  shape: 'circle',   label: 'Pop' },
+    'arc:fireball':     { color: '#ff7f50', size: 5,  shape: 'circle',   label: 'Fireball' },
+    'arc:rocketeer':    { color: '#ff0000', size: 7,  shape: 'diamond',  label: 'Rocketeer' },
+    'arc:turret':       { color: '#c0392b', size: 8,  shape: 'square',   label: 'Turret' },
+    'arc:rollbot':      { color: '#e74c3c', size: 6,  shape: 'diamond',  label: 'Rollbot' },
+    'arc:wasp':         { color: '#ff6348', size: 6,  shape: 'circle',   label: 'Wasp' },
+    'arc:hornet ':      { color: '#e55039', size: 7,  shape: 'triangle', label: 'Hornet' },
+    'arc:bastion':      { color: '#c0392b', size: 9,  shape: 'square',   label: 'Bastion' },
+    'arc:sentinel':     { color: '#96281b', size: 9,  shape: 'diamond',  label: 'Sentinel' },
+    'arc:queen':        { color: '#7b241c', size: 12, shape: 'diamond',  label: '👑 Queen' },
+    'arc:bison':        { color: '#b03a2e', size: 10, shape: 'triangle', label: 'Bison' },
+    'arc:bombardier':   { color: '#e74c3c', size: 7,  shape: 'triangle', label: 'Bombardier' },
+    'arc:snitch':       { color: '#f1948a', size: 5,  shape: 'circle',   label: 'Snitch' },
+    'arc:matriarch':    { color: '#641e16', size: 13, shape: 'diamond',  label: '⚡ Matriarch' },
+    'arc:comet':        { color: '#ff6b35', size: 7,  shape: 'diamond',  label: 'Comet' },
+    'arc:firefly':      { color: '#ffa07a', size: 5,  shape: 'circle',   label: 'Firefly' },
+    'arc:shredder':     { color: '#dc143c', size: 8,  shape: 'square',   label: 'Shredder' },
+    'arc:turbine':      { color: '#b22222', size: 8,  shape: 'diamond',  label: 'Turbine' },
+    'arc:vaporizer':    { color: '#8b0000', size: 9,  shape: 'triangle', label: 'Vaporizer' },
 
-const commands = [
-    new SlashCommandBuilder()
-        .setName('mapdata')
-        .setDescription('Generate a visual overlay of tactical map markers')
-        .addStringOption(option =>
-            option.setName('map')
-                .setDescription('The Map ID to render')
-                .setRequired(true)
-                .addChoices(
-                    { name: 'Dam', value: 'dam' },
-                    { name: 'Stella Montis', value: 'stella_montis' },
-                    { name: 'Buried City', value: 'sector_zero' },
-                    { name: 'Spaceport', value: 'spaceport' },
-                    { name: 'Blue Gate', value: 'blue_gate' },
-                    { name: 'Riven Tides', value: 'riven_tides' }
-                )),
-    new SlashCommandBuilder()
-        .setName('status')
-        .setDescription('Check bot heartbeat and system health')
-].map(command => command.toJSON());
+    // Containers
+    'containers:base_container':      { color: '#1e90ff', size: 4,  shape: 'circle',  label: 'Container' },
+    'containers:breachable_container':{ color: '#00bfff', size: 5,  shape: 'square',  label: 'Breachable' },
+    'containers:ammo_crate':          { color: '#ffd700', size: 6,  shape: 'square',  label: 'Ammo' },
+    'containers:med_crate':           { color: '#00ff7f', size: 6,  shape: 'square',  label: 'Med' },
+    'containers:weapon_case':         { color: '#da70d6', size: 7,  shape: 'diamond', label: 'Weapon Case' },
+    'containers:locker':              { color: '#87ceeb', size: 5,  shape: 'square',  label: 'Locker' },
+    'containers:arc_courier':         { color: '#ff4500', size: 6,  shape: 'circle',  label: 'Arc Courier' },
+    'containers:arc_probe':           { color: '#ff6347', size: 6,  shape: 'circle',  label: 'Arc Probe' },
+    'containers:raider_cache':        { color: '#daa520', size: 6,  shape: 'diamond', label: 'Raider Cache' },
+    'containers:utility_crate':       { color: '#20b2aa', size: 5,  shape: 'square',  label: 'Utility' },
+    'containers:baron_husk':          { color: '#9370db', size: 7,  shape: 'diamond', label: 'Baron Husk' },
+    'containers:wasp_husk':           { color: '#cd853f', size: 6,  shape: 'diamond', label: 'Wasp Husk' },
+    'containers:rocketeer_husk':      { color: '#b8860b', size: 6,  shape: 'diamond', label: 'Rocketeer Husk' },
+    'containers:security_breach':     { color: '#ff1493', size: 7,  shape: 'square',  label: 'Security Breach' },
+    'containers:hurricane_cache':     { color: '#00ced1', size: 7,  shape: 'diamond', label: 'Hurricane Cache' },
+    'containers:combat_supplies':     { color: '#ff8c00', size: 7,  shape: 'square',  label: 'Combat Supplies' },
+    'containers:basket':              { color: '#90ee90', size: 4,  shape: 'circle',  label: 'Basket' },
+    'containers:bag':                 { color: '#8fbc8f', size: 4,  shape: 'circle',  label: 'Bag' },
+    'containers:car':                 { color: '#708090', size: 5,  shape: 'square',  label: 'Vehicle' },
 
-async function registerCommands() {
-    const rest = new REST({ version: '10' }).setToken(TOKEN);
-    try {
-        console.log('🔄 Started refreshing application (/) commands.');
-        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log('✅ Successfully reloaded application (/) commands.');
-    } catch (error) {
-        console.error('❌ Error registering commands:', error);
-    }
+    // Locations
+    'locations:player_spawn':    { color: '#2ed573', size: 7,  shape: 'triangle', label: 'Spawn' },
+    'locations:extraction':      { color: '#7bed9f', size: 9,  shape: 'triangle', label: '✈ Extract' },
+    'locations:supply_station':  { color: '#5352ed', size: 7,  shape: 'square',   label: 'Supply Station' },
+    'locations:field_depot':     { color: '#3742fa', size: 6,  shape: 'square',   label: 'Field Depot' },
+    'locations:raider_camp':     { color: '#eccc68', size: 7,  shape: 'diamond',  label: 'Raider Camp' },
+    'locations:locked_room':     { color: '#ff6b81', size: 7,  shape: 'square',   label: '🔒 Key Room' },
+    'locations:field_crate':     { color: '#a4b0be', size: 5,  shape: 'square',   label: 'Field Crate' },
+    'locations:hatch':           { color: '#ff4500', size: 8,  shape: 'triangle', label: 'Hatch' },
+    'locations:breach_room':     { color: '#ff69b4', size: 7,  shape: 'square',   label: 'Breach Room' },
+    'locations:fuel-cell':       { color: '#00ffff', size: 7,  shape: 'circle',   label: 'Fuel Cell' },
+    'locations:button':          { color: '#adff2f', size: 6,  shape: 'circle',   label: 'Button' },
+
+    // Nature
+    'nature:mushroom':     { color: '#ffa502', size: 4, shape: 'circle', label: 'Mushroom' },
+    'nature:prickly-pear': { color: '#a4c639', size: 4, shape: 'circle', label: 'Prickly Pear' },
+    'nature:agave':        { color: '#4cbb17', size: 4, shape: 'circle', label: 'Agave' },
+    'nature:great-mullein':{ color: '#9acd32', size: 4, shape: 'circle', label: 'Mullein' },
+    'nature:apricot':      { color: '#ffb347', size: 4, shape: 'circle', label: 'Apricot' },
+    'nature:candleberries':{ color: '#ff69b4', size: 5, shape: 'circle', label: 'Candleberries' },
+    'nature:moss':         { color: '#6b8e23', size: 4, shape: 'circle', label: 'Moss' },
+    'nature:roots':        { color: '#8b4513', size: 4, shape: 'circle', label: 'Roots' },
+    'nature:fertilizer':   { color: '#a0522d', size: 4, shape: 'circle', label: 'Fertilizer' },
+
+    // Quests
+    'quests:untended-garden':       { color: '#eccc68', size: 7, shape: 'diamond', label: 'Quest' },
+    'quests:broken-monument':       { color: '#eccc68', size: 7, shape: 'diamond', label: 'Quest' },
+    'quests:straight-record':       { color: '#eccc68', size: 7, shape: 'diamond', label: 'Quest' },
+    'quests:keeping-the-memory':    { color: '#eccc68', size: 7, shape: 'diamond', label: 'Quest' },
+    'quests:a-symbol-of-unification':{ color: '#eccc68', size: 7, shape: 'diamond', label: 'Quest' },
+    'quests:espresso':              { color: '#d4a017', size: 7, shape: 'diamond', label: 'Quest' },
+    'quests:paving-the-way':        { color: '#d4a017', size: 7, shape: 'diamond', label: 'Quest' },
+    'quests:the-league':            { color: '#d4a017', size: 7, shape: 'diamond', label: 'Quest' },
+
+    // Events
+    'events:harvester':     { color: '#ff6b35', size: 9, shape: 'diamond', label: '⚡ Harvester' },
+    'events:snow_pile':     { color: '#b0e0e6', size: 5, shape: 'circle',  label: 'Snow Pile' },
+    'events:assessor':      { color: '#ff4500', size: 8, shape: 'diamond', label: 'Assessor' },
+    'events:ship_model':    { color: '#add8e6', size: 5, shape: 'circle',  label: 'Ship Model' }
+};
+
+// Category-level fallback styles
+const CATEGORY_FALLBACK = {
+    arc:        { color: '#ff4757', size: 5,  shape: 'circle'  },
+    containers: { color: '#1e90ff', size: 5,  shape: 'square'  },
+    locations:  { color: '#2ed573', size: 6,  shape: 'triangle'},
+    nature:     { color: '#ffa502', size: 4,  shape: 'circle'  },
+    quests:     { color: '#eccc68', size: 7,  shape: 'diamond' },
+    events:     { color: '#ff6b35', size: 7,  shape: 'diamond' }
+};
+
+function getMarkerStyle(category, subcategory) {
+    const key = `${category}:${subcategory}`;
+    return MARKER_STYLES[key] || CATEGORY_FALLBACK[category] || { color: '#ffffff', size: 5, shape: 'circle' };
 }
 
-async function generateMapImage(mapId, markers) {
+// ─── Canvas Drawing Helpers ──────────────────────────────────────────────────
+function drawMarker(ctx, x, y, style, locked = false) {
+    const { color, size, shape } = style;
+
+    ctx.save();
+
+    if (shape === 'circle') {
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+    } else if (shape === 'square') {
+        ctx.fillStyle = color;
+        ctx.fillRect(x - size, y - size, size * 2, size * 2);
+    } else if (shape === 'diamond') {
+        ctx.beginPath();
+        ctx.moveTo(x, y - size * 1.3);
+        ctx.lineTo(x + size, y);
+        ctx.lineTo(x, y + size * 1.3);
+        ctx.lineTo(x - size, y);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.fill();
+    } else if (shape === 'triangle') {
+        ctx.beginPath();
+        ctx.moveTo(x, y - size * 1.3);
+        ctx.lineTo(x + size * 1.1, y + size);
+        ctx.lineTo(x - size * 1.1, y + size);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.fill();
+    }
+
+    // Black border
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Lock indicator for behindLockedDoor
+    if (locked) {
+        ctx.font = `${Math.max(8, size)}px Arial`;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText('🔒', x + size, y - size);
+    }
+
+    ctx.restore();
+}
+
+function drawLegend(ctx, usedStyles) {
+    const padding = 10;
+    const itemH = 18;
+    const boxW = 170;
+    const boxH = padding * 2 + usedStyles.length * itemH;
+    const startX = ctx.canvas.width - boxW - 10;
+    const startY = 10;
+
+    // Semi-transparent background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.fillRect(startX, startY, boxW, boxH);
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(startX, startY, boxW, boxH);
+
+    usedStyles.forEach(({ label, color, shape, size }, i) => {
+        const y = startY + padding + i * itemH + itemH / 2;
+        const x = startX + padding + 8;
+
+        // Mini marker
+        ctx.save();
+        const miniSize = 5;
+        if (shape === 'circle') {
+            ctx.beginPath();
+            ctx.arc(x, y, miniSize, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+        } else if (shape === 'square') {
+            ctx.fillStyle = color;
+            ctx.fillRect(x - miniSize, y - miniSize, miniSize * 2, miniSize * 2);
+        } else if (shape === 'diamond') {
+            ctx.beginPath();
+            ctx.moveTo(x, y - miniSize * 1.3);
+            ctx.lineTo(x + miniSize, y);
+            ctx.lineTo(x, y + miniSize * 1.3);
+            ctx.lineTo(x - miniSize, y);
+            ctx.closePath();
+            ctx.fillStyle = color;
+            ctx.fill();
+        } else if (shape === 'triangle') {
+            ctx.beginPath();
+            ctx.moveTo(x, y - miniSize * 1.3);
+            ctx.lineTo(x + miniSize * 1.1, y + miniSize);
+            ctx.lineTo(x - miniSize * 1.1, y + miniSize);
+            ctx.closePath();
+            ctx.fillStyle = color;
+            ctx.fill();
+        }
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+
+        // Label
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '11px Arial';
+        ctx.fillText(label, x + 12, y + 4);
+    });
+}
+
+// ─── Core Image Generation ───────────────────────────────────────────────────
+async function generateMapImage(mapId, markers, categoryFilter, layerKey) {
     const config = MAP_CONFIG[mapId];
-    const imagePath = path.join(__dirname, 'assets', config.file);
-    
-    // Check if asset exists
+    const layerConfig = config.layers[layerKey] || Object.values(config.layers)[0];
+    const imagePath = path.join(__dirname, 'maps', layerConfig.file);
+
     if (!fs.existsSync(imagePath)) {
-        throw new Error(`MISSING_IMAGE:${config.file}`);
+        throw new Error(`MISSING_IMAGE:${layerConfig.file}`);
     }
 
     const baseImage = await loadImage(imagePath);
     const canvas = createCanvas(baseImage.width, baseImage.height);
     const ctx = canvas.getContext('2d');
-
-    // Draw the base map image
     ctx.drawImage(baseImage, 0, 0);
 
-    // Render each tactical marker based on its category
-    markers.forEach(marker => {
-        const { lat, lng, category } = marker;
-        
-        // Scale world coordinates to pixel coordinates
-        const x = ((lng - config.bounds.minLng) / (config.bounds.maxLng - config.bounds.minLng)) * baseImage.width;
-        const y = ((lat - config.bounds.minLat) / (config.bounds.maxLat - config.bounds.minLat)) * baseImage.height;
+    const { minLat, maxLat, minLng, maxLng } = config.bounds;
+    const scaleX = baseImage.width  / (maxLng - minLng);
+    const scaleY = baseImage.height / (maxLat - minLat);
 
-        // Categorical color coding logic
-        let color = '#ffffff';
-        switch(category?.toLowerCase()) {
-            case 'arc': color = '#ff4757'; break;      // Red
-            case 'containers': color = '#1e90ff'; break; // Blue
-            case 'locations': color = '#2ed573'; break;  // Green
-            case 'nature': color = '#ffa502'; break;    // Orange
-            case 'quests': color = '#eccc68'; break;    // Gold
-            default: color = '#ffffff';                 // White
-        }
-
-        // Draw marker dot
-        ctx.beginPath();
-        ctx.arc(x, y, 6, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-        ctx.lineWidth = 2;
-        ctx.stroke();
+    // Filter markers by category and zlayer
+    const filtered = markers.filter(m => {
+        const catMatch = categoryFilter === 'all' || m.category === categoryFilter;
+        // layerKey 1 = underground (zlayers === 1), surface = everything else
+        const layerMatch = layerKey === 1 ? m.zlayers === 1 : m.zlayers !== 1;
+        return catMatch && layerMatch;
     });
+
+    // Track which styles are actually used for the legend
+    const usedStyleMap = new Map();
+
+    filtered.forEach(marker => {
+        const { lat, lng, category, subcategory, behindLockedDoor } = marker;
+        const x = (lng - minLng) * scaleX;
+        const y = (lat - minLat) * scaleY;
+        const style = getMarkerStyle(category, subcategory);
+
+        drawMarker(ctx, x, y, style, behindLockedDoor);
+
+        const key = `${category}:${subcategory}`;
+        if (!usedStyleMap.has(key)) {
+            usedStyleMap.set(key, { ...style, label: style.label || subcategory });
+        }
+    });
+
+    // Draw legend if not too many types
+    const usedStyles = [...usedStyleMap.values()];
+    if (usedStyles.length <= 25) {
+        drawLegend(ctx, usedStyles);
+    }
+
+    // Draw info bar at top
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, 0, baseImage.width, 28);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 14px Arial';
+    ctx.fillText(`${config.name} — ${layerConfig.label} — ${filtered.length} markers`, 10, 19);
 
     return canvas.toBuffer('image/png');
 }
 
-client.once(Events.ClientReady, (c) => {
-    console.log(`📡 Uplink established. Logged in as ${c.user.tag}`);
+// ─── Statistics Helper ───────────────────────────────────────────────────────
+function buildStats(markers) {
+    const counts = {};
+    markers.forEach(m => {
+        const key = m.category || 'unknown';
+        counts[key] = (counts[key] || 0) + 1;
+    });
+    return counts;
+}
+
+// ─── Discord Setup ───────────────────────────────────────────────────────────
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+const commands = [
+    new SlashCommandBuilder()
+        .setName('mapdata')
+        .setDescription('Generate a visual overlay of tactical map markers')
+        .addStringOption(o =>
+            o.setName('map')
+                .setDescription('Map to render')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Dam Battlegrounds', value: 'dam' },
+                    { name: 'Buried City',        value: 'sector_zero' },
+                    { name: 'Stella Montis',      value: 'stella_montis' },
+                    { name: 'Spaceport',          value: 'spaceport' },
+                    { name: 'Blue Gate',          value: 'blue_gate' },
+                    { name: 'Riven Tides',        value: 'riven_tides' }
+                ))
+        .addStringOption(o =>
+            o.setName('category')
+                .setDescription('Filter by marker category (default: all)')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'All',        value: 'all' },
+                    { name: 'ARC Units',  value: 'arc' },
+                    { name: 'Containers', value: 'containers' },
+                    { name: 'Locations',  value: 'locations' },
+                    { name: 'Nature',     value: 'nature' },
+                    { name: 'Quests',     value: 'quests' },
+                    { name: 'Events',     value: 'events' }
+                ))
+        .addStringOption(o =>
+            o.setName('layer')
+                .setDescription('Map layer (default: surface)')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'Surface / Upper', value: 'surface' },
+                    { name: 'Underground / Lower', value: 'underground' }
+                )),
+
+    new SlashCommandBuilder()
+        .setName('mapstats')
+        .setDescription('Show marker statistics for a map without generating an image')
+        .addStringOption(o =>
+            o.setName('map')
+                .setDescription('Map to check')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Dam Battlegrounds', value: 'dam' },
+                    { name: 'Buried City',        value: 'sector_zero' },
+                    { name: 'Stella Montis',      value: 'stella_montis' },
+                    { name: 'Spaceport',          value: 'spaceport' },
+                    { name: 'Blue Gate',          value: 'blue_gate' },
+                    { name: 'Riven Tides',        value: 'riven_tides' }
+                )),
+
+    new SlashCommandBuilder()
+        .setName('status')
+        .setDescription('Check bot heartbeat and system health')
+].map(c => c.toJSON());
+
+async function registerCommands() {
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    try {
+        console.log('🔄 Refreshing slash commands...');
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+        console.log('✅ Commands registered.');
+    } catch (err) {
+        console.error('❌ Command registration failed:', err);
+    }
+}
+
+async function fetchMarkers(mapId) {
+    const url = `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapId}`;
+    const res = await axios.get(url, { timeout: 15000 });
+    if (Array.isArray(res.data)) return res.data;
+    if (Array.isArray(res.data?.data)) return res.data.data;
+    const found = Object.values(res.data || {}).find(v => Array.isArray(v));
+    return found || [];
+}
+
+// ─── Event Handlers ──────────────────────────────────────────────────────────
+client.once(Events.ClientReady, c => {
+    console.log(`📡 Online as ${c.user.tag}`);
     registerCommands();
 });
 
 client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    console.log(`📥 Received command: /${interaction.commandName} from ${interaction.user.tag}`);
+    const { commandName, user } = interaction;
+    console.log(`📥 /${commandName} from ${user.tag}`);
 
-    // Command Router logic
-    const handledCommands = ['mapdata', 'mapview', 'status'];
-    if (!handledCommands.includes(interaction.commandName)) {
-        return interaction.reply({ 
-            content: `❌ Command \`/${interaction.commandName}\` is not implemented in this version.`, 
-            flags: [MessageFlags.Ephemeral] 
+    // ── /status ───────────────────────────────────────────────────────────────
+    if (commandName === 'status') {
+        return interaction.reply({
+            content: `✅ **Online** | Ping: **${client.ws.ping}ms** | Commands: \`/mapdata\`, \`/mapstats\``,
+            flags: [MessageFlags.Ephemeral]
         });
     }
 
-    // Security check for administrator access
-    if (OWNER_ID !== '0' && interaction.user.id !== OWNER_ID) {
-        return interaction.reply({ 
-            content: '⚠️ **Unauthorized Access:** Access restricted to administrator.', 
-            flags: [MessageFlags.Ephemeral] 
-        });
-    }
+    // ── /mapstats ─────────────────────────────────────────────────────────────
+    if (commandName === 'mapstats') {
+        await interaction.deferReply();
+        const mapId = interaction.options.getString('map');
+        const config = MAP_CONFIG[mapId];
 
-    // Execution block for map generation
-    if (interaction.commandName === 'mapdata' || interaction.commandName === 'mapview') {
         try {
-            // CRITICAL: Immediately defer to prevent "Application Not Responding"
-            await interaction.deferReply(); 
+            const markers = await fetchMarkers(mapId);
+            const stats = buildStats(markers);
+            const locked = markers.filter(m => m.behindLockedDoor).length;
+            const underground = markers.filter(m => m.zlayers === 1).length;
 
-            const mapID = interaction.options.getString('map');
-            const apiUrl = `https://metaforge.app/api/game-map-data?tableID=arc_map_data&mapID=${mapID}`;
+            const statsLines = Object.entries(stats)
+                .sort((a, b) => b[1] - a[1])
+                .map(([cat, n]) => `\`${cat.padEnd(12)}\` **${n}**`)
+                .join('\n');
 
-            console.log(`🛰️ Fetching tactical data for: ${mapID}`);
-            const res = await axios.get(apiUrl);
-            
-            // Robust data extraction: checking for raw array or nested data property
-            let markers = [];
-            if (Array.isArray(res.data)) {
-                markers = res.data;
-            } else if (res.data && Array.isArray(res.data.data)) {
-                markers = res.data.data;
-            } else if (res.data && typeof res.data === 'object') {
-                // Fallback: search for any array property in the root object
-                const foundArray = Object.values(res.data).find(val => Array.isArray(val));
-                markers = foundArray || [];
-            }
-
-            if (markers.length === 0) {
-                return interaction.editReply(`⚠️ No marker data found for **${MAP_CONFIG[mapID].name}**. (API returned empty)`);
-            }
-
-            console.log(`🎨 Rendering ${markers.length} markers onto ${MAP_CONFIG[mapID].file}...`);
-            const imageBuffer = await generateMapImage(mapID, markers);
-            const attachment = new AttachmentBuilder(imageBuffer, { name: `tactical_map.png` });
-
-            // Build rich embed for response
             const embed = new EmbedBuilder()
-                .setTitle(`🗺️ Tactical Overlay: ${MAP_CONFIG[mapID].name}`)
-                .setDescription(`Visualizing intelligence for **${markers.length}** map points.`)
+                .setTitle(`📊 ${config.name} — Marker Statistics`)
+                .setDescription(statsLines)
                 .addFields(
-                    { name: '🔴 ARC', value: 'Hostiles/Units', inline: true },
-                    { name: '🔵 Loot', value: 'Containers', inline: true },
-                    { name: '🟢 POIs', value: 'Spawns/Exits', inline: true }
+                    { name: 'Total Markers', value: `**${markers.length}**`, inline: true },
+                    { name: 'Behind Locked Doors', value: `**${locked}**`, inline: true },
+                    { name: 'Underground Layer', value: `**${underground}**`, inline: true }
                 )
                 .setColor(0x2f3542)
-                .setImage(`attachment://tactical_map.png`)
-                .setTimestamp()
-                .setFooter({ text: 'Raider Companion Intelligence System' });
+                .setTimestamp();
 
-            await interaction.editReply({ embeds: [embed], files: [attachment] });
-            console.log(`✅ Success: Visual report for ${mapID} delivered.`);
-
+            return interaction.editReply({ embeds: [embed] });
         } catch (err) {
-            console.error('❌ Interaction Error:', err);
-            
-            let userError = "❌ An internal error occurred during map generation.";
-            if (err.message.startsWith('MISSING_IMAGE')) {
-                const missingFile = err.message.split(':')[1];
-                userError = `❌ Map asset \`${missingFile}\` was not found in the \`/assets/\` folder. Please upload the map image.`;
-            }
-            
-            if (interaction.deferred) {
-                await interaction.editReply(userError);
-            } else {
-                await interaction.reply({ content: userError, flags: [MessageFlags.Ephemeral] });
-            }
+            console.error(err);
+            return interaction.editReply(`❌ Failed to fetch data for **${config.name}**.`);
         }
     }
 
-    // Health check command
-    if (interaction.commandName === 'status') {
-        await interaction.reply({ 
-            content: `✅ **Uplink Stable:** Heartbeat is ${client.ws.ping}ms. System operational.`, 
-            flags: [MessageFlags.Ephemeral] 
-        });
+    // ── /mapdata ──────────────────────────────────────────────────────────────
+    if (commandName === 'mapdata') {
+        await interaction.deferReply();
+
+        const mapId          = interaction.options.getString('map');
+        const categoryFilter = interaction.options.getString('category') || 'all';
+        const layerChoice    = interaction.options.getString('layer') || 'surface';
+        const layerKey       = layerChoice === 'underground' ? 1 : 2147483647;
+        const config         = MAP_CONFIG[mapId];
+        const layerConfig    = config.layers[layerKey] || Object.values(config.layers)[0];
+
+        try {
+            const markers = await fetchMarkers(mapId);
+
+            if (!markers.length) {
+                return interaction.editReply(`⚠️ No marker data returned for **${config.name}**.`);
+            }
+
+            console.log(`🎨 Rendering ${markers.length} raw markers → filter: ${categoryFilter}, layer: ${layerChoice}`);
+            const imageBuffer = await generateMapImage(mapId, markers, categoryFilter, layerKey);
+
+            // Always attach the rendered overlay
+            const files = [new AttachmentBuilder(imageBuffer, { name: 'overlay.png' })];
+
+            // Attach thumbnail from /assets/ if it exists
+            const thumbnailFile = config.thumbnail
+                ? path.join(__dirname, 'assets', config.thumbnail)
+                : null;
+            const hasThumbnail = thumbnailFile && fs.existsSync(thumbnailFile);
+            if (hasThumbnail) {
+                files.push(new AttachmentBuilder(thumbnailFile, { name: config.thumbnail }));
+            }
+
+            // Attach banner from /assets/ if it exists
+            const bannerPath = path.join(__dirname, 'assets', 'banner.jpg');
+            const hasBanner = fs.existsSync(bannerPath);
+            if (hasBanner) {
+                files.push(new AttachmentBuilder(bannerPath, { name: 'banner.jpg' }));
+            }
+
+            // Count what's actually shown after filters
+            const shown = markers.filter(m => {
+                const catOk   = categoryFilter === 'all' || m.category === categoryFilter;
+                const layerOk = layerKey === 1 ? m.zlayers === 1 : m.zlayers !== 1;
+                return catOk && layerOk;
+            }).length;
+
+            const stats = buildStats(markers);
+            const topCategories = Object.entries(stats)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 6)
+                .map(([k, v]) => ({ name: k, value: `${v}`, inline: true }));
+
+            const embed = new EmbedBuilder()
+                .setTitle(`🗺️ ${config.name} — ${layerConfig.label}`)
+                .setDescription(
+                    `Showing **${shown}** of **${markers.length}** total markers` +
+                    (categoryFilter !== 'all' ? ` (filtered: \`${categoryFilter}\`)` : '') +
+                    '\n\n**Marker Types:**\n🔴 Circle = ARC units  🔷 Diamond = High-value  🟦 Square = Containers  🔺 Triangle = Locations'
+                )
+                .addFields(...topCategories)
+                .setColor(0x2f3542)
+                .setImage('attachment://overlay.png')
+                .setTimestamp()
+                .setFooter({ text: `metaforge.app data · ${config.name}` });
+
+            // Wire up /assets/ images to embed if they exist
+            if (hasThumbnail) embed.setThumbnail(`attachment://${config.thumbnail}`);
+            if (hasBanner)    embed.setAuthor({ name: 'ARC Raiders Map Intelligence', iconURL: 'attachment://banner.jpg' });
+
+            return interaction.editReply({ embeds: [embed], files });
+
+        } catch (err) {
+            console.error('❌ Map generation error:', err);
+
+            let msg = '❌ An error occurred generating the map overlay.';
+            if (err.message?.startsWith('MISSING_IMAGE')) {
+                const file = err.message.split(':')[1];
+                msg = `❌ Map file \`${file}\` not found in \`/maps/\`. Check the filename matches exactly.`;
+            } else if (err.code === 'ECONNABORTED') {
+                msg = '❌ API request timed out. Try again in a moment.';
+            }
+
+            return interaction.editReply(msg);
+        }
     }
 });
 
